@@ -129,5 +129,18 @@ namespace NinjaTrader.NinjaScript.Strategies
         public bool ActivarLogs { get; set; }
 
         #endregion
+
+        #region Cooldown y Modo Operativo
+
+        [NinjaScriptProperty]
+        [Range(1, 50)]
+        [Display(Name = "Cooldown Barras Post-Trade", Description = "Número de barras mínimas a esperar después de cerrar una operación antes de autorizar otra señal.", Order = 9, GroupName = "01. Gestión de Posición y Riesgo")]
+        public int CooldownBarrasPostTrade { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Modo Solo Dataset (Shadow)", Description = "Registra señales y toma capturas de pantalla para AI sin enviar órdenes reales al broker.", Order = 10, GroupName = "01. Gestión de Posición y Riesgo")]
+        public bool ModoSoloDataset { get; set; }
+
+        #endregion
     }
 }

@@ -16,7 +16,8 @@ Tradingbot/
 ├── ExcesoRotacionBot.Properties.cs # Parámetros editables en la GUI de NT8
 ├── ExcesoRotacionBot.Niveles.cs    # Niveles fijos institucionales
 ├── trainer/
-│   └── dataset_generator.py        # Pipeline en Python para entrenar modelos con las imágenes
+│   ├── dataset_generator.py        # Pipeline en Python para validar y preprocesar el dataset
+│   └── train_vision.py             # Script de entrenamiento PyTorch (ResNet18)
 ├── vision_dataset/                 # Dataset de capturas e índices de muestras etiquetadas
 │   ├── images/
 │   └── labels.json
@@ -33,7 +34,11 @@ Tradingbot/
 * **Procesamiento limpio**: Todo el cálculo de Order Flow, VWAP de sesión, Delta y perfiles se procesa en memoria mediante una serie de datos secundaria interna de 1 tick.
 * **Marcas mínimas**: Únicamente dibuja flechas y textos limpios en el momento exacto en que se valida una señal.
 
-### 2. Reglas Operativas Principales
+### 2. Control de Frecuencia y Modo Shadow
+* **Cooldown Barras Post-Trade**: Permite fijar un enfriamiento en barras (ej. 8 barras) tras salir de una posición para evitar sobreoperar el mismo ciclo o quedar atrapado en sacudidas inmediatas.
+* **Modo Solo Dataset (Shadow)**: Permite activar la estrategia en vivo o replay para detectar excesos, evaluar confluencias, calcular scoring y capturar los frames del gráfico en segundo plano **sin enviar ninguna orden al broker**.
+
+### 3. Reglas Operativas Principales
 * **Horarios de Sesión (Hora NY)**:
   * **Asia**: 19:00 → 03:00 (Sídney integrada). Al cerrar, fija `Asia High/Low`.
   * **Europa**: 03:00 → 09:30. Al cerrar, fija `Europa High/Low` (**nivel rector**).
@@ -43,7 +48,14 @@ Tradingbot/
 * **Gatillo de Apertura (09:30 NY)**: Primera barra de 15m sobre High/Low de Europa que presente exceso y rotación recibe bonificación decisiva (+8 pts).
 * **Scoring Engine de Confluencia**: Pondera niveles clave (Europa, Asia, VWAP, VAH/VAL, POC, niveles fijos institucionales) y delta para autorizar la entrada (`ScoreTotal >= ScoreMinimoSenal`).
 
-### 3. Gestión de Posición en 3 Tercios
+### 4. Parámetros Recomendados en NinjaTrader 8
+* **Score Mínimo para Señal:** `18.0`
+* **Umbral Velocidad Flujo:** `150.0`
+* **Distancia Mínima Rotación:** `10`
+* **Cooldown Barras Post-Trade:** `8`
+* **Modo Solo Dataset (Shadow):** `true` (para acumular capturas) / `false` (para operar en vivo)
+
+### 5. Gestión de Posición en 3 Tercios
 * **Entrada**: 3 sub-órdenes iguales (`Entrada_1`, `Entrada_2`, `Entrada_3`).
 * **Stop Loss**: 20 puntos inicial para toda la posición.
 * **TP1 (1/3)**: +15 puntos. Al completarse $\rightarrow$ Stop Loss de los tercios 2 y 3 se mueve a **Break-Even**.
@@ -59,12 +71,15 @@ Tradingbot/
 Cada vez que el bot detecta una señal válida con `ExportarDatasetVision = true`:
 1. Registra automáticamente los metadatos en `vision_dataset/labels.json` (`id`, `timestamp`, `signal`, `score`, `confluences`, `price`, `delta`, `image_path`).
 2. Captura de forma asíncrona el fotograma del gráfico mediante el `ChartControl` de NinjaTrader y lo guarda en `vision_dataset/images/{id}.png`.
-3. El módulo Python `trainer/dataset_generator.py` permite cargar, validar y preprocesar las imágenes (normalización y redimensionado a 224x224) para entrenar clasificadores de Computer Vision (CNNs, ResNet, ViT, YOLOv8).
-
-Para ejecutar el preprocesador:
-```bash
-python trainer/dataset_generator.py
-```
+3. Para preprocesar el dataset:
+   ```bash
+   python trainer/dataset_generator.py
+   ```
+4. Para entrenar el modelo clasificador (ResNet18):
+   ```bash
+   pip install torch torchvision pillow
+   python trainer/train_vision.py
+   ```
 
 ---
 

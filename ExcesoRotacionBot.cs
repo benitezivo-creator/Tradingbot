@@ -58,6 +58,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 DistanciaTrailingRunnerPuntos               = 20.0;
                 PermitirRunnerEnCortos                      = false;
                 TPRunnerCortosPuntos                        = 30.0;
+                CooldownBarrasPostTrade                     = 8;
+                ModoSoloDataset                             = false;
 
                 // 02. Detección de Exceso y Rotación
                 UmbralVelocidadExceso                       = 80.0; // contratos/segundo en ventana rodante
@@ -158,6 +160,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Monitorear posición abierta al cierre de cada barra primaria
             MonitorearPosicionAbierta(Closes[0][0]);
 
+            // Monitorear filtro de cooldown post-trade
+            ProcesarFiltroYCooldown();
+
             // Comprobar cierre preventivo al final de sesión
             ComprobarCierreFinDeSesion(tiempoBarraNy);
         }
@@ -223,6 +228,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (estadoActual == EstadoBot.EN_POSICION || estadoActual == EstadoBot.PROTEGIDO || estadoActual == EstadoBot.RUNNER)
                 {
                     RegistrarLog("POSICIÓN TOTALMENTE CERRADA -> Volviendo a IDLE.");
+                    barraUltimoCierre = CurrentBars[0];
                     ReiniciarMaquinaEstados();
                 }
             }

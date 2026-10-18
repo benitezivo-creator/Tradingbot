@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Windows.Media;
+using NinjaTrader.Cbi;
 using NinjaTrader.Core.FloatingPoint;
 using NinjaTrader.Data;
 using NinjaTrader.Gui.Tools;
@@ -69,6 +70,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         // --- Scoring y Ponderación calculada ---
         private double scorePonderacionActual = 0.0;
         private string detallePonderacionActual = string.Empty;
+
+        // --- Filtro de Cooldown Post-Trade ---
+        private int barraUltimoCierre = -100;
 
         // Evalúa tick a tick la detección y mantenimiento del Exceso
         private void EvaluarExcesoTick(DateTime tiempo, double precio)
@@ -379,6 +383,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Si el score supera el umbral mínimo -> EMITIR SEÑAL
             if (score >= ScoreMinimoSenal && direccionPendiente != DireccionSenal.Ninguna)
             {
+                // Validación de Cooldown post-trade
+                if (!ValidarCooldown())
+                {
+                    ReiniciarMaquinaEstados();
+                    return;
+                }
+
                 estadoActual = EstadoBot.SENAL;
 
                 // Feedback visual en el gráfico
@@ -396,7 +407,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // AI Vision Dataset: Exportar muestra de señal y snapshot
                 ExportarMuestraVision(direccionPendiente.ToString(), score, detallePonderacionActual);
 
-                EjecutarEntradaEstrategia(direccionPendiente, tipoOperacionActual);
+                // Ejecución: en Modo Solo Dataset (Shadow) no se lanzan órdenes reales
+                if (!ModoSoloDataset)
+                {
+                    EjecutarEntradaEstrategia(direccionPendiente, tipoOperacionActual);
+                }
+                else
+                {
+                    RegistrarLog("MODO SHADOW (SOLO DATASET): Señal y frame capturados. Ejecución omitida.");
+                    ReiniciarMaquinaEstados();
+                }
             }
             else
             {
@@ -421,6 +441,26 @@ namespace NinjaTrader.NinjaScript.Strategies
             esRetestContinuacion = false;
             esGiroCompleto = false;
             esEventoApertura = false;
+        }
+
+        private void ProcesarFiltroYCooldown()
+        {
+            // Registrar la barra del último cierre cuando la posición vuelve a Flat
+            if (Position.MarketPosition == MarketPosition.Flat && PositionAccount != null && PositionAccount.MarketPosition != MarketPosition.Flat)
+            {
+                barraUltimoCierre = CurrentBars[0];
+            }
+        }
+
+        private bool ValidarCooldown()
+        {
+            if (CurrentBars[0] - barraUltimoCierre < CooldownBarrasPostTrade)
+            {
+                RegistrarLog(string.Format("[COOLDOWN] Señal omitida. Barras transcurridas: {0} / {1}",
+                    CurrentBars[0] - barraUltimoCierre, CooldownBarrasPostTrade));
+                return false;
+            }
+            return true;
         }
     }
 }
