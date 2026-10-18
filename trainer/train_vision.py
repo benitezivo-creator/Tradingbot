@@ -35,23 +35,23 @@ class TradingVisionDataset(Dataset):
                 
                 raw_samples = json.loads(content)
                 
-                # Cargamos TANTO ganadores (WIN) como perdedores (LOSS) para que la red pueda comparar
+                # Cargar tanto etiquetas con resultado (WIN/LOSS) como directas (Compra/Venta)
                 wins = 0
                 losses = 0
+                directas = 0
+                
                 for item in raw_samples:
                     signal = item.get("signal", "")
-                    pnl = item.get("pnl", None)
-                    is_win = "WIN" in signal or (pnl is not None and pnl > 0)
-                    is_loss = "LOSS" in signal or (pnl is not None and pnl < 0)
-                    
-                    if is_win or is_loss:
+                    if signal:
                         self.samples.append(item)
-                        if is_win:
+                        if "WIN" in signal:
                             wins += 1
-                        else:
+                        elif "LOSS" in signal:
                             losses += 1
+                        else:
+                            directas += 1
                         
-                print(f"[+] Dataset cargado: {len(self.samples)} muestras totales ({wins} WINs / {losses} LOSSes).")
+                print(f"[+] Dataset cargado: {len(self.samples)} muestras totales ({wins} WINs / {losses} LOSSes / {directas} Directas).")
             except Exception as e:
                 print(f"[!] Error leyendo JSON de etiquetas: {e}")
                 self.samples = []
@@ -64,10 +64,12 @@ class TradingVisionDataset(Dataset):
         img_path = os.path.join(self.img_dir, os.path.basename(item["image_path"]))
         image = Image.open(img_path).convert("RGB")
         
-        # Clase 1 = WIN (Patrón Válido), Clase 0 = LOSS (Patrón Rechazado)
         signal_str = item.get("signal", "")
-        pnl = item.get("pnl", None)
-        label = 1 if ("WIN" in signal_str or (pnl is not None and pnl > 0)) else 0
+        # Mapeo: 1 para WIN/Compra, 0 para LOSS/Venta
+        if "WIN" in signal_str or ("LOSS" not in signal_str and "Compra" in signal_str):
+            label = 1
+        else:
+            label = 0
         
         if self.transform:
             image = self.transform(image)
@@ -84,25 +86,24 @@ def entrenar_modelo():
 
     dataset = TradingVisionDataset(LABELS_FILE, os.path.join(DATASET_DIR, "images"), transform=transformaciones)
     
-    if len(dataset) < 15:
-        print(f"[!] Dataset insuficiente ({len(dataset)} muestras con resultado WIN/LOSS). Acumula más capturas en Replay con trades completados.")
+    if len(dataset) < 10:
+        print(f"[!] Dataset insuficiente ({len(dataset)} muestras). Acumula más capturas en Replay.")
         return
 
     loader = DataLoader(dataset, batch_size=4, shuffle=True)
     
-    # ResNet-18 clasificando WIN (1) vs LOSS (0)
     try:
         model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
     except (AttributeError, TypeError):
         model = models.resnet18(pretrained=True)
-        
+
     model.fc = nn.Linear(model.fc.in_features, 2)
     
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.0002)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
-    print(f"[+] Iniciando entrenamiento por contraste WIN vs LOSS ({len(dataset)} muestras)...")
+    print(f"[+] Iniciando entrenamiento con {len(dataset)} muestras...")
     model.train()
     
     for epoch in range(20):
@@ -121,7 +122,7 @@ def entrenar_modelo():
 
     output_path = r"C:\Users\SIBS\Documents\Tradingbot\trainer\model_vision.pth"
     torch.save(model.state_dict(), output_path)
-    print(f"[✓] Modelo guardado correctamente en: {output_path}")
+    print(f"[OK] Modelo guardado correctamente en: {output_path}")
 
 if __name__ == "__main__":
     entrenar_modelo()

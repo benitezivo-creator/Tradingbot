@@ -89,6 +89,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 // Serie secundaria interna de 1 tick para reconstruir el order flow, la cinta y el delta con exactitud
                 AddDataSeries(BarsPeriodType.Tick, 1);
+
+                // Stop Loss rígido de 20 puntos (80 ticks) por contrato para proteger la cuenta
+                SetStopLoss(CalculationMode.Ticks, 80);
+
+                // Target base de 15 puntos (60 ticks) para el primer tercio
+                SetProfitTarget(CalculationMode.Ticks, 60);
             }
             else if (State == State.DataLoaded)
             {
@@ -138,6 +144,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Evaluar exceso y rotación
                 EvaluarExcesoTick(tiempo, precio);
                 EvaluarRotacionTick(precio);
+
+                // Monitorear posición abierta tick a tick en histórico y replay
+                MonitorearPosicionAbierta(precio);
                 return;
             }
 
