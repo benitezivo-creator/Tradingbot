@@ -13,6 +13,7 @@ Tradingbot/
 ├── ExcesoRotacionBot.OrderFlow.cs  # Motor de Delta, Cinta, Velocidad y Bracket VND
 ├── ExcesoRotacionBot.Sessions.cs   # Lógica de Sesiones (Asia, Europa, NY) y VAH/VAL/POC
 ├── ExcesoRotacionBot.StateMachine.cs # Máquina de Estados (Exceso, Rotación, Scoring y Gatillo)
+├── ExcesoRotacionBot.Telemetry.cs    # Captura HD de Gráfico (RenderTargetBitmap en UI Thread)
 ├── ExcesoRotacionBot.Properties.cs # Parámetros editables en la GUI de NT8
 ├── ExcesoRotacionBot.Niveles.cs    # Niveles fijos institucionales
 ├── trainer/

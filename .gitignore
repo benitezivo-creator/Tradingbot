@@ -41,3 +41,7 @@ ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 .DS_Store
+
+# Dataset Images
+vision_dataset/images/*.png
+!vision_dataset/images/.gitkeep

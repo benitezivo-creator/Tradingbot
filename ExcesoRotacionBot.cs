@@ -268,32 +268,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 File.AppendAllText(rutaJson, entradaJson + Environment.NewLine);
 
-                // Si NT8 tiene habilitado el Chart Control, captura el frame
-                if (ChartControl != null)
-                {
-                    ChartControl.Dispatcher.InvokeAsync(() =>
-                    {
-                        try
-                        {
-                            int width = (int)Math.Max(1, ChartControl.ActualWidth);
-                            int height = (int)Math.Max(1, ChartControl.ActualHeight);
-                            var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(
-                                width, height, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
-                            rtb.Render(ChartControl);
-
-                            using (var stream = new FileStream(rutaImagen, FileMode.Create))
-                            {
-                                var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
-                                encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rtb));
-                                encoder.Save(stream);
-                            }
-                        }
-                        catch (Exception imgEx)
-                        {
-                            RegistrarLog("AVISO AL GUARDAR CAPTURA DE GRÁFICO: " + imgEx.Message);
-                        }
-                    });
-                }
+                // Capturar el frame visual en alta definición
+                CapturarSnapshotGrafico(rutaImagen);
 
                 RegistrarLog(string.Format("AI DATASET: Muestra registrada -> {0}", idMuestra));
             }
