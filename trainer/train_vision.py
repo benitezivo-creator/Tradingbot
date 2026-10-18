@@ -12,7 +12,7 @@ DATASET_DIR = r"C:\Users\SIBS\Documents\Tradingbot\vision_dataset"
 LABELS_FILE = os.path.join(DATASET_DIR, "labels.json")
 
 class TradingVisionDataset(Dataset):
-    def __init__(self, labels_file, img_dir, transform=None):
+    def __init__(self, labels_file, img_dir, transform=None, solo_ganadores=True):
         self.img_dir = img_dir
         self.transform = transform
         self.samples = []
@@ -36,8 +36,21 @@ class TradingVisionDataset(Dataset):
                 # Sanitizar números con comas decimales regionales (ej. :19,00 -> :19.00)
                 content = re.sub(r'(:\s*-?\d+),(\d+)', r'\1.\2', content)
                 
-                self.samples = json.loads(content)
-                print(f"[+] Se cargaron exitosamente {len(self.samples)} muestras válidas del JSON.")
+                raw_samples = json.loads(content)
+                print(f"[+] Se cargaron exitosamente {len(raw_samples)} muestras válidas del JSON.")
+
+                # Filtro inteligente de PnL: entrenar preferentemente con trades ganadores (WIN)
+                tiene_etiquetas_pnl = any("WIN_" in s.get("signal", "") or "LOSS_" in s.get("signal", "") for s in raw_samples)
+                if solo_ganadores and tiene_etiquetas_pnl:
+                    muestras_win = [s for s in raw_samples if s.get("signal", "").startswith("WIN_") or s.get("pnl", 0) > 0]
+                    if len(muestras_win) >= 5:
+                        self.samples = muestras_win
+                        print(f"[+] Filtro PnL activo: {len(self.samples)} muestras GANADORAS (WIN) seleccionadas para entrenamiento.")
+                    else:
+                        print(f"[i] Muestras WIN insuficientes ({len(muestras_win)}). Usando todas las muestras ({len(raw_samples)}).")
+                        self.samples = raw_samples
+                else:
+                    self.samples = raw_samples
             except Exception as e:
                 print(f"[!] Error leyendo JSON de etiquetas: {e}")
                 self.samples = []
@@ -50,8 +63,9 @@ class TradingVisionDataset(Dataset):
         img_path = os.path.join(self.img_dir, os.path.basename(item["image_path"]))
         image = Image.open(img_path).convert("RGB")
         
-        # Etiqueta: 1 para Compra, 0 para Venta
-        label = 1 if item.get("signal") == "Compra" else 0
+        # Etiqueta: 1 para Compra (o WIN_Compra), 0 para Venta (o WIN_Venta)
+        signal = item.get("signal", "")
+        label = 1 if "Compra" in signal else 0
         
         if self.transform:
             image = self.transform(image)

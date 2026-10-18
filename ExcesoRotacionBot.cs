@@ -229,6 +229,26 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     RegistrarLog("POSICIÓN TOTALMENTE CERRADA -> Volviendo a IDLE.");
                     barraUltimoCierre = CurrentBars[0];
+
+                    // Etiquetar muestra con resultado real del trade
+                    if (!string.IsNullOrEmpty(ultimaRutaImagenEjecutada))
+                    {
+                        double pnlRealizado = 0.0;
+                        try
+                        {
+                            if (SystemPerformance != null && SystemPerformance.AllTrades != null)
+                            {
+                                pnlRealizado = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit - cumProfitAlEntrar;
+                            }
+                        }
+                        catch
+                        {
+                            pnlRealizado = 0.0;
+                        }
+                        RegistrarMuestraConResultado(ultimaSenalEjecutada, pnlRealizado, ultimaRutaImagenEjecutada);
+                        ultimaRutaImagenEjecutada = string.Empty;
+                    }
+
                     ReiniciarMaquinaEstados();
                 }
             }
@@ -270,6 +290,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 // Capturar el frame visual en alta definición
                 CapturarSnapshotGrafico(rutaImagen);
+
+                // Guardar referencia para etiquetar con resultado WIN/LOSS al cerrar el trade
+                ultimaSenalEjecutada = tipoSenal;
+                ultimaRutaImagenEjecutada = rutaImagen;
+                try
+                {
+                    cumProfitAlEntrar = (SystemPerformance != null && SystemPerformance.AllTrades != null)
+                        ? SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit
+                        : 0.0;
+                }
+                catch
+                {
+                    cumProfitAlEntrar = 0.0;
+                }
 
                 RegistrarLog(string.Format("AI DATASET: Muestra registrada -> {0}", idMuestra));
             }

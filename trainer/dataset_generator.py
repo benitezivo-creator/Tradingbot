@@ -73,7 +73,8 @@ def preparar_datos_vision(samples, target_size=(224, 224)):
             X_images.append(img_array)
 
             # 1 = COMPRA, -1 = VENTA
-            label = 1 if sample.get("signal") == "Compra" else -1
+            signal = sample.get("signal", "")
+            label = 1 if "Compra" in signal else -1
             y_labels.append(label)
         except Exception as e:
             print(f"[!] Error procesando imagen {img_full_path}: {e}")
@@ -92,5 +93,10 @@ if __name__ == "__main__":
             compras = int(np.sum(y > 0))
             ventas = int(np.sum(y < 0))
             print(f"    - Balance de clases (Compras/Ventas): {compras} / {ventas}")
+            
+        wins = sum(1 for s in muestras if s.get("signal", "").startswith("WIN_") or s.get("pnl", 0) > 0)
+        losses = sum(1 for s in muestras if s.get("signal", "").startswith("LOSS_") or s.get("pnl", 0) < 0)
+        if wins + losses > 0:
+            print(f"    - Desglose PnL: {wins} WINs | {losses} LOSSes")
     else:
         print("[i] Para comenzar a entrenar, genera señales en NinjaTrader 8 o añade imágenes manuales a vision_dataset/images/")

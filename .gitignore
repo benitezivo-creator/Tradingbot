@@ -34,6 +34,7 @@ wheels/
 .installed.cfg
 *.egg
 trainer/output_model/
+*.pth
 
 # OS
 Thumbs.db
