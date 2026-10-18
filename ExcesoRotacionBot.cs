@@ -261,7 +261,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 string rutaJson = Path.Combine(RutaDatasetVision, "labels.json");
                 string rutaImagen = Path.Combine(RutaDatasetVision, "images", idMuestra + ".png");
 
-                string entradaJson = string.Format(
+                string entradaJson = string.Format(CultureInfo.InvariantCulture,
                     "{{\"id\":\"{0}\",\"timestamp\":\"{1:o}\",\"signal\":\"{2}\",\"score\":{3:F2},\"confluences\":\"{4}\",\"price\":{5:F2},\"delta\":{6:F1},\"image_path\":\"images/{0}.png\"}},",
                     idMuestra, DateTime.Now, tipoSenal, score, (confluencias ?? string.Empty).Replace("\"", "'"), Closes[0][0], deltaSesionAcumulado
                 );

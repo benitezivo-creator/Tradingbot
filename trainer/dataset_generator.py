@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import numpy as np
 from PIL import Image
 
@@ -23,11 +24,19 @@ def cargar_dataset():
             print(f"[!] El archivo de etiquetas está vacío: {LABELS_FILE}")
             return []
         
-        # Elimina coma final si quedó abierta por stream
+        # Arreglar formato si las entradas fueron agregadas como objetos sueltos
+        if not content.startswith("["):
+            content = "[" + content
         if content.endswith(","):
-            content = "[" + content[:-1] + "]"
-        elif not content.startswith("["):
-            content = "[" + content + "]"
+            content = content[:-1]
+        if not content.endswith("]"):
+            content = content + "]"
+        
+        # Reemplazar posibles trailing commas entre objetos
+        content = re.sub(r',\s*\]', ']', content)
+        
+        # Sanitizar números con comas decimales regionales (ej. :19,00 -> :19.00)
+        content = re.sub(r'(:\s*-?\d+),(\d+)', r'\1.\2', content)
         
         try:
             samples = json.loads(content)
@@ -35,7 +44,7 @@ def cargar_dataset():
             print(f"[!] Error leyendo JSON de etiquetas: {e}")
             return []
 
-    print(f"[+] Se cargaron {len(samples)} muestras del dataset de visión.")
+    print(f"[+] Se cargaron exitosamente {len(samples)} muestras del dataset de visión.")
     return samples
 
 def preparar_datos_vision(samples, target_size=(224, 224)):

@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,8 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 from PIL import Image
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATASET_DIR = os.getenv("VISION_DATASET_DIR", os.path.join(BASE_DIR, "vision_dataset"))
+DATASET_DIR = r"C:\Users\SIBS\Documents\Tradingbot\vision_dataset"
 LABELS_FILE = os.path.join(DATASET_DIR, "labels.json")
 
 class TradingVisionDataset(Dataset):
@@ -18,18 +18,29 @@ class TradingVisionDataset(Dataset):
         self.samples = []
         
         if os.path.exists(labels_file):
-            with open(labels_file, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content:
-                    if content.endswith(","):
-                        content = "[" + content[:-1] + "]"
-                    elif not content.startswith("["):
-                        content = "[" + content + "]"
-                    try:
-                        self.samples = json.loads(content)
-                    except Exception as e:
-                        print(f"[!] Error leyendo JSON de etiquetas: {e}")
-                        self.samples = []
+            try:
+                with open(labels_file, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                
+                # Arreglar formato si las entradas fueron agregadas como objetos sueltos
+                if not content.startswith("["):
+                    content = "[" + content
+                if content.endswith(","):
+                    content = content[:-1]
+                if not content.endswith("]"):
+                    content = content + "]"
+                
+                # Reemplazar posibles trailing commas entre objetos
+                content = re.sub(r',\s*\]', ']', content)
+                
+                # Sanitizar números con comas decimales regionales (ej. :19,00 -> :19.00)
+                content = re.sub(r'(:\s*-?\d+),(\d+)', r'\1.\2', content)
+                
+                self.samples = json.loads(content)
+                print(f"[+] Se cargaron exitosamente {len(self.samples)} muestras válidas del JSON.")
+            except Exception as e:
+                print(f"[!] Error leyendo JSON de etiquetas: {e}")
+                self.samples = []
 
     def __len__(self):
         return len(self.samples)
@@ -55,13 +66,14 @@ def entrenar_modelo():
     ])
 
     dataset = TradingVisionDataset(LABELS_FILE, os.path.join(DATASET_DIR, "images"), transform=transformaciones)
+    
     if len(dataset) < 10:
         print(f"[!] Dataset insuficiente ({len(dataset)} muestras). Acumula más capturas antes de entrenar (mínimo 10).")
         return
 
     loader = DataLoader(dataset, batch_size=8, shuffle=True)
     
-    # Modelo ResNet18 transfer learning
+    # Cargar ResNet-18 compatible con todas las versiones de torchvision
     try:
         model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
     except (AttributeError, TypeError):
@@ -86,7 +98,7 @@ def entrenar_modelo():
             
         print(f"Época {epoch+1}/5 - Pérdida: {running_loss/len(loader):.4f}")
 
-    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_vision.pth")
+    output_path = r"C:\Users\SIBS\Documents\Tradingbot\trainer\model_vision.pth"
     torch.save(model.state_dict(), output_path)
     print(f"[✓] Modelo guardado en: {output_path}")
 
