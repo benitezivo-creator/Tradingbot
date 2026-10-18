@@ -12,7 +12,7 @@ DATASET_DIR = r"C:\Users\SIBS\Documents\Tradingbot\vision_dataset"
 LABELS_FILE = os.path.join(DATASET_DIR, "labels.json")
 
 class TradingVisionDataset(Dataset):
-    def __init__(self, labels_file, img_dir, transform=None, solo_ganadores=True):
+    def __init__(self, labels_file, img_dir, transform=None):
         self.img_dir = img_dir
         self.transform = transform
         self.samples = []
@@ -35,17 +35,23 @@ class TradingVisionDataset(Dataset):
                 
                 raw_samples = json.loads(content)
                 
-                # Filtrar muestras según el criterio
+                # Cargamos TANTO ganadores (WIN) como perdedores (LOSS) para que la red pueda comparar
+                wins = 0
+                losses = 0
                 for item in raw_samples:
                     signal = item.get("signal", "")
-                    if solo_ganadores:
-                        # Si hay etiquetas WIN/LOSS, tomar solo WIN. Si es esquema viejo, tomar todas.
-                        if "WIN" in signal or ("LOSS" not in signal and signal in ["Compra", "Venta"]):
-                            self.samples.append(item)
-                    else:
+                    pnl = item.get("pnl", None)
+                    is_win = "WIN" in signal or (pnl is not None and pnl > 0)
+                    is_loss = "LOSS" in signal or (pnl is not None and pnl < 0)
+                    
+                    if is_win or is_loss:
                         self.samples.append(item)
+                        if is_win:
+                            wins += 1
+                        else:
+                            losses += 1
                         
-                print(f"[+] Se cargaron exitosamente {len(self.samples)} muestras válidas (Filtrado WIN: {solo_ganadores}).")
+                print(f"[+] Dataset cargado: {len(self.samples)} muestras totales ({wins} WINs / {losses} LOSSes).")
             except Exception as e:
                 print(f"[!] Error leyendo JSON de etiquetas: {e}")
                 self.samples = []
@@ -58,9 +64,10 @@ class TradingVisionDataset(Dataset):
         img_path = os.path.join(self.img_dir, os.path.basename(item["image_path"]))
         image = Image.open(img_path).convert("RGB")
         
-        # Etiqueta: 1 para Compra, 0 para Venta
+        # Clase 1 = WIN (Patrón Válido), Clase 0 = LOSS (Patrón Rechazado)
         signal_str = item.get("signal", "")
-        label = 1 if "Compra" in signal_str else 0
+        pnl = item.get("pnl", None)
+        label = 1 if ("WIN" in signal_str or (pnl is not None and pnl > 0)) else 0
         
         if self.transform:
             image = self.transform(image)
@@ -68,7 +75,6 @@ class TradingVisionDataset(Dataset):
         return image, torch.tensor(label, dtype=torch.long)
 
 def entrenar_modelo():
-    # Transformaciones avanzadas con Data Augmentation
     transformaciones = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ColorJitter(brightness=0.1, contrast=0.1),
@@ -76,32 +82,27 @@ def entrenar_modelo():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    dataset = TradingVisionDataset(
-        LABELS_FILE, 
-        os.path.join(DATASET_DIR, "images"), 
-        transform=transformaciones,
-        solo_ganadores=True
-    )
+    dataset = TradingVisionDataset(LABELS_FILE, os.path.join(DATASET_DIR, "images"), transform=transformaciones)
     
-    if len(dataset) < 10:
-        print(f"[!] Dataset insuficiente ({len(dataset)} muestras). Acumula más capturas antes de entrenar.")
+    if len(dataset) < 15:
+        print(f"[!] Dataset insuficiente ({len(dataset)} muestras con resultado WIN/LOSS). Acumula más capturas en Replay con trades completados.")
         return
 
     loader = DataLoader(dataset, batch_size=4, shuffle=True)
     
-    # Cargar ResNet-18 con compatibilidad de versión
+    # ResNet-18 clasificando WIN (1) vs LOSS (0)
     try:
         model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
     except (AttributeError, TypeError):
         model = models.resnet18(pretrained=True)
-
+        
     model.fc = nn.Linear(model.fc.in_features, 2)
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.0003)
+    optimizer = optim.Adam(model.parameters(), lr=0.0002)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
-    print(f"[+] Iniciando entrenamiento con {len(dataset)} imágenes ganadoras por 20 épocas...")
+    print(f"[+] Iniciando entrenamiento por contraste WIN vs LOSS ({len(dataset)} muestras)...")
     model.train()
     
     for epoch in range(20):
@@ -120,7 +121,7 @@ def entrenar_modelo():
 
     output_path = r"C:\Users\SIBS\Documents\Tradingbot\trainer\model_vision.pth"
     torch.save(model.state_dict(), output_path)
-    print(f"[✓] Modelo optimizado guardado correctamente en: {output_path}")
+    print(f"[✓] Modelo guardado correctamente en: {output_path}")
 
 if __name__ == "__main__":
     entrenar_modelo()
