@@ -22,7 +22,6 @@ class TradingVisionDataset(Dataset):
                 with open(labels_file, "r", encoding="utf-8") as f:
                     content = f.read().strip()
                 
-                # Arreglar formato si las entradas fueron agregadas como objetos sueltos
                 if not content.startswith("["):
                     content = "[" + content
                 if content.endswith(","):
@@ -30,27 +29,23 @@ class TradingVisionDataset(Dataset):
                 if not content.endswith("]"):
                     content = content + "]"
                 
-                # Reemplazar posibles trailing commas entre objetos
                 content = re.sub(r',\s*\]', ']', content)
-                
                 # Sanitizar números con comas decimales regionales (ej. :19,00 -> :19.00)
                 content = re.sub(r'(:\s*-?\d+),(\d+)', r'\1.\2', content)
                 
                 raw_samples = json.loads(content)
-                print(f"[+] Se cargaron exitosamente {len(raw_samples)} muestras válidas del JSON.")
-
-                # Filtro inteligente de PnL: entrenar preferentemente con trades ganadores (WIN)
-                tiene_etiquetas_pnl = any("WIN_" in s.get("signal", "") or "LOSS_" in s.get("signal", "") for s in raw_samples)
-                if solo_ganadores and tiene_etiquetas_pnl:
-                    muestras_win = [s for s in raw_samples if s.get("signal", "").startswith("WIN_") or s.get("pnl", 0) > 0]
-                    if len(muestras_win) >= 5:
-                        self.samples = muestras_win
-                        print(f"[+] Filtro PnL activo: {len(self.samples)} muestras GANADORAS (WIN) seleccionadas para entrenamiento.")
+                
+                # Filtrar muestras según el criterio
+                for item in raw_samples:
+                    signal = item.get("signal", "")
+                    if solo_ganadores:
+                        # Si hay etiquetas WIN/LOSS, tomar solo WIN. Si es esquema viejo, tomar todas.
+                        if "WIN" in signal or ("LOSS" not in signal and signal in ["Compra", "Venta"]):
+                            self.samples.append(item)
                     else:
-                        print(f"[i] Muestras WIN insuficientes ({len(muestras_win)}). Usando todas las muestras ({len(raw_samples)}).")
-                        self.samples = raw_samples
-                else:
-                    self.samples = raw_samples
+                        self.samples.append(item)
+                        
+                print(f"[+] Se cargaron exitosamente {len(self.samples)} muestras válidas (Filtrado WIN: {solo_ganadores}).")
             except Exception as e:
                 print(f"[!] Error leyendo JSON de etiquetas: {e}")
                 self.samples = []
@@ -63,9 +58,9 @@ class TradingVisionDataset(Dataset):
         img_path = os.path.join(self.img_dir, os.path.basename(item["image_path"]))
         image = Image.open(img_path).convert("RGB")
         
-        # Etiqueta: 1 para Compra (o WIN_Compra), 0 para Venta (o WIN_Venta)
-        signal = item.get("signal", "")
-        label = 1 if "Compra" in signal else 0
+        # Etiqueta: 1 para Compra, 0 para Venta
+        signal_str = item.get("signal", "")
+        label = 1 if "Compra" in signal_str else 0
         
         if self.transform:
             image = self.transform(image)
@@ -73,21 +68,28 @@ class TradingVisionDataset(Dataset):
         return image, torch.tensor(label, dtype=torch.long)
 
 def entrenar_modelo():
+    # Transformaciones avanzadas con Data Augmentation
     transformaciones = transforms.Compose([
         transforms.Resize((224, 224)),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    dataset = TradingVisionDataset(LABELS_FILE, os.path.join(DATASET_DIR, "images"), transform=transformaciones)
+    dataset = TradingVisionDataset(
+        LABELS_FILE, 
+        os.path.join(DATASET_DIR, "images"), 
+        transform=transformaciones,
+        solo_ganadores=True
+    )
     
     if len(dataset) < 10:
-        print(f"[!] Dataset insuficiente ({len(dataset)} muestras). Acumula más capturas antes de entrenar (mínimo 10).")
+        print(f"[!] Dataset insuficiente ({len(dataset)} muestras). Acumula más capturas antes de entrenar.")
         return
 
-    loader = DataLoader(dataset, batch_size=8, shuffle=True)
+    loader = DataLoader(dataset, batch_size=4, shuffle=True)
     
-    # Cargar ResNet-18 compatible con todas las versiones de torchvision
+    # Cargar ResNet-18 con compatibilidad de versión
     try:
         model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
     except (AttributeError, TypeError):
@@ -96,11 +98,13 @@ def entrenar_modelo():
     model.fc = nn.Linear(model.fc.in_features, 2)
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = optim.Adam(model.parameters(), lr=0.0003)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
-    print(f"[+] Iniciando entrenamiento con {len(dataset)} imágenes...")
+    print(f"[+] Iniciando entrenamiento con {len(dataset)} imágenes ganadoras por 20 épocas...")
     model.train()
-    for epoch in range(5):
+    
+    for epoch in range(20):
         running_loss = 0.0
         for images, labels in loader:
             optimizer.zero_grad()
@@ -110,11 +114,13 @@ def entrenar_modelo():
             optimizer.step()
             running_loss += loss.item()
             
-        print(f"Época {epoch+1}/5 - Pérdida: {running_loss/len(loader):.4f}")
+        scheduler.step()
+        loss_promedio = running_loss / len(loader)
+        print(f"Época {epoch+1:02d}/20 - Pérdida (Loss): {loss_promedio:.4f}")
 
     output_path = r"C:\Users\SIBS\Documents\Tradingbot\trainer\model_vision.pth"
     torch.save(model.state_dict(), output_path)
-    print(f"[✓] Modelo guardado en: {output_path}")
+    print(f"[✓] Modelo optimizado guardado correctamente en: {output_path}")
 
 if __name__ == "__main__":
     entrenar_modelo()
