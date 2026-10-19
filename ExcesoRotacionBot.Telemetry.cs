@@ -33,12 +33,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 try
                 {
-                    // Obtener las coordenadas del control del gráfico en la pantalla
+                    // Obtener las coordenadas físicas exactas del control del gráfico en la pantalla (DPI-Aware)
                     System.Windows.Point upperLeft = ChartControl.PointToScreen(new System.Windows.Point(0, 0));
-                    int width = (int)ChartControl.ActualWidth;
-                    int height = (int)ChartControl.ActualHeight;
+                    System.Windows.Point bottomRight = ChartControl.PointToScreen(new System.Windows.Point(ChartControl.ActualWidth, ChartControl.ActualHeight));
 
-                    if (width <= 0 || height <= 0) return;
+                    int width = (int)Math.Max(1, bottomRight.X - upperLeft.X);
+                    int height = (int)Math.Max(1, bottomRight.Y - upperLeft.Y);
+
+                    if (width <= 10 || height <= 10) return;
 
                     // Crear directorio si no existe
                     string directorio = Path.GetDirectoryName(rutaDestino);
