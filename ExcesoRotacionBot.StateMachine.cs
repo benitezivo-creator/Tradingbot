@@ -410,7 +410,23 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Ejecución: en Modo Solo Dataset (Shadow) no se lanzan órdenes reales
                 if (!ModoSoloDataset)
                 {
-                    EjecutarEntradaEstrategia(direccionPendiente, tipoOperacionActual);
+                    // FILTRO DE INFERENCIA EN TIEMPO REAL (Vision AI Gate)
+                    bool tradeAprobadoPorVision = true;
+                    if (ActivarFiltroVisionAI)
+                    {
+                        tradeAprobadoPorVision = ValidarEntradaConVisionAI(ultimaRutaImagenEjecutada);
+                    }
+
+                    if (tradeAprobadoPorVision)
+                    {
+                        RegistrarLog("[ESTRATEGIA] Entrada APROBADA por ResNet-18. Ejecutando 3 Tercios...");
+                        EjecutarEntradaEstrategia(direccionPendiente, tipoOperacionActual);
+                    }
+                    else
+                    {
+                        RegistrarLog(string.Format("[ESTRATEGIA] Entrada RECHAZADA por Filtro de Visión (P_WIN < {0:P0}). Trade cancelado.", UmbralProbabilidadVisionAI));
+                        ReiniciarMaquinaEstados();
+                    }
                 }
                 else
                 {

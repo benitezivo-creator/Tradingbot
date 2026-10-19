@@ -1,7 +1,9 @@
 using System;
 using System.IO;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Windows;
+using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Chart;
 using NinjaTrader.NinjaScript.Strategies;
 
@@ -17,49 +19,70 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string ultimaSenalEjecutada = string.Empty;
         private string ultimaRutaImagenEjecutada = string.Empty;
         private double cumProfitAlEntrar = 0.0;
+        private string ultimoSnapshotImagen = string.Empty;
+        private int ultimoTradeNumberRegistrado = -1;
 
         /// <summary>
-        /// Captura el estado visual exacto del gráfico desde el UI Thread utilizando RenderTargetBitmap.
+        /// Captura la imagen del gráfico de NinjaTrader de forma directa (GDI/Screen Copy) para evitar marcos negros por aceleración GPU DirectX.
         /// </summary>
-        private void CapturarSnapshotGrafico(string rutaDestino)
+        private void CapturarSnapshotGrafico(string rutaDestino, bool sincrono = true)
         {
             if (ChartControl == null) return;
 
-            ChartControl.Dispatcher.InvokeAsync(() =>
+            Action accionCaptura = () =>
             {
                 try
                 {
+                    // Obtener las coordenadas del control del gráfico en la pantalla
+                    System.Windows.Point upperLeft = ChartControl.PointToScreen(new System.Windows.Point(0, 0));
                     int width = (int)ChartControl.ActualWidth;
                     int height = (int)ChartControl.ActualHeight;
 
                     if (width <= 0 || height <= 0) return;
 
-                    RenderTargetBitmap renderTargetBitmap = new RenderTargetBitmap(
-                        width, height, 96, 96, PixelFormats.Pbgra32);
-
-                    renderTargetBitmap.Render(ChartControl);
-
-                    PngBitmapEncoder pngEncoder = new PngBitmapEncoder();
-                    pngEncoder.Frames.Add(BitmapFrame.Create(renderTargetBitmap));
-
+                    // Crear directorio si no existe
                     string directorio = Path.GetDirectoryName(rutaDestino);
                     if (!string.IsNullOrEmpty(directorio) && !Directory.Exists(directorio))
                     {
                         Directory.CreateDirectory(directorio);
                     }
 
-                    using (FileStream stream = new FileStream(rutaDestino, FileMode.Create, FileAccess.Write))
+                    // Captura con GDI+ sobre la ventana de NinjaTrader
+                    using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
                     {
-                        pngEncoder.Save(stream);
+                        using (Graphics g = Graphics.FromImage(bitmap))
+                        {
+                            g.CopyFromScreen(
+                                (int)upperLeft.X, 
+                                (int)upperLeft.Y, 
+                                0, 0, 
+                                new System.Drawing.Size(width, height), 
+                                CopyPixelOperation.SourceCopy
+                            );
+                        }
+
+                        bitmap.Save(rutaDestino, ImageFormat.Png);
                     }
 
-                    Print(string.Format("[TELEMETRIA] Captura guardada en: {0}", rutaDestino));
+                    Print(string.Format("[TELEMETRIA] Captura HD generada en: {0}", rutaDestino));
                 }
                 catch (Exception ex)
                 {
-                    Print(string.Format("[TELEMETRIA ERROR] Fallo al generar captura: {0}", ex.Message));
+                    Print(string.Format("[TELEMETRIA ERROR] Fallo al capturar gráfico: {0}", ex.Message));
                 }
-            });
+            };
+
+            if (sincrono)
+            {
+                if (ChartControl.Dispatcher.CheckAccess())
+                    accionCaptura();
+                else
+                    ChartControl.Dispatcher.Invoke(accionCaptura);
+            }
+            else
+            {
+                ChartControl.Dispatcher.InvokeAsync(accionCaptura);
+            }
         }
 
         /// <summary>
@@ -71,24 +94,108 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 string estadoResultado = pnlRealizado > 0 ? "WIN" : "LOSS";
                 string etiquetaFinal = string.Format("{0}_{1}", estadoResultado, signalType);
-                string rutaRelativa = "images/" + Path.GetFileName(rutaImagen);
 
                 string jsonEntry = string.Format(
                     "{{\"timestamp\":\"{0}\",\"signal\":\"{1}\",\"pnl\":{2},\"image_path\":\"{3}\"}},",
                     DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                     etiquetaFinal,
-                    pnlRealizado.ToString("F2", System.Globalization.CultureInfo.InvariantCulture),
-                    rutaRelativa.Replace("\\", "/")
+                    pnlRealizado.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    rutaImagen.Replace("\\", "\\\\")
                 );
 
                 string rutaJson = Path.Combine(DirectorioDataset, "labels.json");
                 File.AppendAllText(rutaJson, jsonEntry + Environment.NewLine);
                 
-                Print(string.Format("[DATASET] Muestra registrada: {0} | PnL: {1:F2}", etiquetaFinal, pnlRealizado));
+                Print(string.Format("[DATASET] Muestra registrada: {0} | PnL: {1}", etiquetaFinal, pnlRealizado));
             }
             catch (Exception ex)
             {
                 Print(string.Format("[DATASET ERROR] No se pudo guardar etiqueta: {0}", ex.Message));
+            }
+        }
+
+        /// <summary>
+        /// Evento que detecta tanto trades automáticos como ejecuciones manuales (Chart Trader / DOM).
+        /// </summary>
+        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            base.OnExecutionUpdate(execution, executionId, price, quantity, marketPosition, orderId, time);
+
+            if (execution == null || execution.Order == null)
+                return;
+
+            try
+            {
+                // Registro de llenados de órdenes
+                RegistrarLog(string.Format("EJECUCIÓN: {0} {1}x @ {2:F2} | Orden: {3} | Posición Actual: {4}",
+                    execution.Order.Name, quantity, price, orderId, marketPosition));
+
+                // 1. Capturar el instante exacto en que se ejecuta una entrada (Manual o Automática)
+                if (Position.MarketPosition != MarketPosition.Flat)
+                {
+                    if (precioEntradaPromedio <= 0.0)
+                        precioEntradaPromedio = Position.AveragePrice;
+
+                    // Detectar si la orden es de entrada
+                    bool esEntrada = execution.Order.OrderAction == OrderAction.Buy
+                                  || execution.Order.OrderAction == OrderAction.SellShort
+                                  || (execution.Order.Name != null && (execution.Order.Name.Contains("Entrada") || execution.Order.Name.Contains("Entry")));
+
+                    if (esEntrada)
+                    {
+                        bool esBot = (execution.Order.Name != null && (execution.Order.Name.Contains("Entrada") || execution.Order.Name.Contains("Entry") || execution.Order.Name.StartsWith("ORDEN_")))
+                                  || (!string.IsNullOrEmpty(execution.Order.FromEntrySignal) && !execution.Order.FromEntrySignal.Equals("Order", StringComparison.OrdinalIgnoreCase));
+                        string origen = esBot ? "BOT" : "MANUAL";
+                        string tipoOrden = Position.MarketPosition == MarketPosition.Long ? "Compra" : "Venta";
+
+                        string nombreImagen = string.Format("{0}_{1}_{2}.png", origen, tipoOrden, time.ToString("yyyyMMdd_HHmmss"));
+                        string rutaImagen = Path.Combine(DirectorioDataset, "images", nombreImagen);
+
+                        if (nombreImagen != ultimoSnapshotImagen)
+                        {
+                            ultimoSnapshotImagen = nombreImagen;
+                            CapturarSnapshotGrafico(rutaImagen);
+                        }
+                    }
+                }
+                else
+                {
+                    // 2. Al cerrarse el trade (Flat), calcular el PnL y registrar la muestra final en labels.json
+                    if (estadoActual == EstadoBot.EN_POSICION || estadoActual == EstadoBot.PROTEGIDO || estadoActual == EstadoBot.RUNNER)
+                    {
+                        RegistrarLog("POSICIÓN TOTALMENTE CERRADA -> Volviendo a IDLE.");
+                        barraUltimoCierre = CurrentBars[0];
+                        ReiniciarMaquinaEstados();
+                    }
+
+                    if (SystemPerformance != null && SystemPerformance.AllTrades != null && SystemPerformance.AllTrades.Count > 0)
+                    {
+                        Trade ultimoTrade = SystemPerformance.AllTrades[SystemPerformance.AllTrades.Count - 1];
+
+                        if (ultimoTrade != null && ultimoTrade.TradeNumber != ultimoTradeNumberRegistrado && execution.Order.OrderState == OrderState.Filled)
+                        {
+                            ultimoTradeNumberRegistrado = ultimoTrade.TradeNumber;
+
+                            double pnlTrade = ultimoTrade.ProfitCurrency;
+                            string tipoOrden = (ultimoTrade.Entry != null && ultimoTrade.Entry.MarketPosition == MarketPosition.Long) ? "Compra" : "Venta";
+
+                            bool esBotTrade = (ultimoTrade.Entry != null && ultimoTrade.Entry.Name != null
+                                && (ultimoTrade.Entry.Name.Contains("Entrada") || ultimoTrade.Entry.Name.Contains("Entry") || ultimoTrade.Entry.Name.StartsWith("ORDEN_")));
+                            string origen = esBotTrade ? "BOT" : "MANUAL";
+
+                            string identificadorSeñal = string.Format("{0}_{1}", origen, tipoOrden);
+                            DateTime tiempoEntrada = (ultimoTrade.Entry != null) ? ultimoTrade.Entry.Time : time;
+                            string nombreImagen = string.Format("{0}_{1}_{2}.png", origen, tipoOrden, tiempoEntrada.ToString("yyyyMMdd_HHmmss"));
+                            string rutaImagen = Path.Combine(DirectorioDataset, "images", nombreImagen);
+
+                            RegistrarMuestraConResultado(identificadorSeñal, pnlTrade, rutaImagen);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Print(string.Format("[TELEMETRIA DISCRECIONAL ERROR] {0}", ex.Message));
             }
         }
     }

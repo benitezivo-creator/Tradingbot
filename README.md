@@ -10,15 +10,19 @@ Estrategia algorítmica institucional para **NinjaTrader 8** desacoplada de rend
 Tradingbot/
 ├── ExcesoRotacionBot.cs            # Strategy Core, Ciclo de vida y Exportador Dataset Visión
 ├── ExcesoRotacionBot.Execution.cs  # Gestión de Posición en 3 Tercios (SL, TP1, TP2, Runner Trailing)
+├── ExcesoRotacionBot.Inference.cs  # Gate de Inferencia en Tiempo Real (HTTP Client vs FastAPI)
+├── ExcesoRotacionBot.Niveles.cs    # Niveles fijos institucionales
 ├── ExcesoRotacionBot.OrderFlow.cs  # Motor de Delta, Cinta, Velocidad y Bracket VND
+├── ExcesoRotacionBot.Properties.cs # Parámetros editables en la GUI de NT8
 ├── ExcesoRotacionBot.Sessions.cs   # Lógica de Sesiones (Asia, Europa, NY) y VAH/VAL/POC
 ├── ExcesoRotacionBot.StateMachine.cs # Máquina de Estados (Exceso, Rotación, Scoring y Gatillo)
 ├── ExcesoRotacionBot.Telemetry.cs    # Captura HD de Gráfico (RenderTargetBitmap en UI Thread)
-├── ExcesoRotacionBot.Properties.cs # Parámetros editables en la GUI de NT8
-├── ExcesoRotacionBot.Niveles.cs    # Niveles fijos institucionales
 ├── trainer/
 │   ├── dataset_generator.py        # Pipeline en Python para validar y preprocesar el dataset
+│   ├── inference_server.py         # Microservicio FastAPI para inferencia de visión en <15ms
+│   ├── model_vision.pth            # Pesos entrenados de la red ResNet-18
 │   └── train_vision.py             # Script de entrenamiento PyTorch (ResNet18)
+├── run_inference_server.bat        # Lanzador rápido del servidor local de inferencia
 ├── vision_dataset/                 # Dataset de capturas e índices de muestras etiquetadas
 │   ├── images/
 │   └── labels.json
@@ -81,6 +85,21 @@ Cada vez que el bot detecta una señal válida con `ExportarDatasetVision = true
    pip install torch torchvision pillow
    python trainer/train_vision.py
    ```
+5. Para iniciar el Servidor de Inferencia en Tiempo Real (FastAPI):
+   ```bash
+   python trainer/inference_server.py
+   # O ejecuta: run_inference_server.bat
+   ```
+
+---
+
+## ⚡ Inferencia en Tiempo Real (Vision AI Gate)
+
+Cuando el bot detecta un setup técnico con score suficiente:
+1. Captura de forma síncrona el snapshot del gráfico en alta resolución.
+2. Consulta al microservicio local en `http://127.0.0.1:5005/predict` en menos de **15 ms**.
+3. Si $P(WIN) \ge 0.70$ (umbral editable), la orden se ejecuta al mercado en 3 tercios. Si no, el trade se aborta automáticamente protegiendo el capital.
+4. Si el servidor Python no estuviese iniciado, cuenta con **bypass seguro por defecto** para evitar que la estrategia se bloquee.
 
 ---
 

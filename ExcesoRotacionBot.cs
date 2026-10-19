@@ -27,6 +27,19 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Ruta Exportación Dataset", Description = "Ruta local donde se almacenarán los eventos e imágenes.", Order = 2, GroupName = "06. AI & Dataset")]
         public string RutaDatasetVision { get; set; }
 
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Filtro Vision AI", Description = "Consulta la ResNet-18 antes de ejecutar cada orden. Si P(WIN) < umbral, el trade se aborta.", Order = 3, GroupName = "06. AI & Dataset")]
+        public bool ActivarFiltroVisionAI { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.10, 0.99)]
+        [Display(Name = "Umbral Probabilidad WIN AI", Description = "Probabilidad mínima calculada por el modelo para autorizar la entrada (ej. 0.70 = 70%).", Order = 4, GroupName = "06. AI & Dataset")]
+        public double UmbralProbabilidadVisionAI { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "URL Servidor Inferencia", Description = "Endpoint local de predicción en FastAPI (por defecto http://127.0.0.1:5005/predict).", Order = 5, GroupName = "06. AI & Dataset")]
+        public string UrlServidorInferencia { get; set; }
+
         protected override void OnStateChange()
         {
             if (State == State.SetDefaults)
@@ -84,6 +97,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // 06. AI & Dataset Config
                 ExportarDatasetVision                       = true;
                 RutaDatasetVision                           = @"C:\Users\SIBS\Documents\Tradingbot\vision_dataset";
+                ActivarFiltroVisionAI                       = true;
+                UmbralProbabilidadVisionAI                  = 0.70;
+                UrlServidorInferencia                       = "http://127.0.0.1:5005/predict";
             }
             else if (State == State.Configure)
             {
@@ -216,52 +232,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity,
-            MarketPosition marketPosition, string orderId, DateTime time)
-        {
-            if (execution == null || execution.Order == null)
-                return;
-
-            // Registro de llenados de órdenes
-            RegistrarLog(string.Format("EJECUCIÓN: {0} {1}x @ {2:F2} | Orden: {3} | Posición Actual: {4}",
-                execution.Order.Name, quantity, price, orderId, marketPosition));
-
-            if (Position.MarketPosition != MarketPosition.Flat)
-            {
-                if (precioEntradaPromedio <= 0.0)
-                    precioEntradaPromedio = Position.AveragePrice;
-            }
-            else
-            {
-                // Posición totalmente cerrada
-                if (estadoActual == EstadoBot.EN_POSICION || estadoActual == EstadoBot.PROTEGIDO || estadoActual == EstadoBot.RUNNER)
-                {
-                    RegistrarLog("POSICIÓN TOTALMENTE CERRADA -> Volviendo a IDLE.");
-                    barraUltimoCierre = CurrentBars[0];
-
-                    // Etiquetar muestra con resultado real del trade
-                    if (!string.IsNullOrEmpty(ultimaRutaImagenEjecutada))
-                    {
-                        double pnlRealizado = 0.0;
-                        try
-                        {
-                            if (SystemPerformance != null && SystemPerformance.AllTrades != null)
-                            {
-                                pnlRealizado = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit - cumProfitAlEntrar;
-                            }
-                        }
-                        catch
-                        {
-                            pnlRealizado = 0.0;
-                        }
-                        RegistrarMuestraConResultado(ultimaSenalEjecutada, pnlRealizado, ultimaRutaImagenEjecutada);
-                        ultimaRutaImagenEjecutada = string.Empty;
-                    }
-
-                    ReiniciarMaquinaEstados();
-                }
-            }
-        }
 
         private void RegistrarLog(string mensaje)
         {
@@ -276,7 +246,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         // =========================================================================
         private void ExportarMuestraVision(string tipoSenal, double score, string confluencias)
         {
-            if (!ExportarDatasetVision) return;
+            if (!ExportarDatasetVision && !ActivarFiltroVisionAI) return;
 
             try
             {
@@ -290,15 +260,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 string rutaJson = Path.Combine(RutaDatasetVision, "labels.json");
                 string rutaImagen = Path.Combine(RutaDatasetVision, "images", idMuestra + ".png");
 
-                string entradaJson = string.Format(CultureInfo.InvariantCulture,
-                    "{{\"id\":\"{0}\",\"timestamp\":\"{1:o}\",\"signal\":\"{2}\",\"score\":{3:F2},\"confluences\":\"{4}\",\"price\":{5:F2},\"delta\":{6:F1},\"image_path\":\"images/{0}.png\"}},",
-                    idMuestra, DateTime.Now, tipoSenal, score, (confluencias ?? string.Empty).Replace("\"", "'"), Closes[0][0], deltaSesionAcumulado
-                );
+                if (ExportarDatasetVision)
+                {
+                    string entradaJson = string.Format(CultureInfo.InvariantCulture,
+                        "{{\"id\":\"{0}\",\"timestamp\":\"{1:o}\",\"signal\":\"{2}\",\"score\":{3:F2},\"confluences\":\"{4}\",\"price\":{5:F2},\"delta\":{6:F1},\"image_path\":\"images/{0}.png\"}},",
+                        idMuestra, DateTime.Now, tipoSenal, score, (confluencias ?? string.Empty).Replace("\"", "'"), Closes[0][0], deltaSesionAcumulado
+                    );
 
-                File.AppendAllText(rutaJson, entradaJson + Environment.NewLine);
+                    File.AppendAllText(rutaJson, entradaJson + Environment.NewLine);
+                }
 
-                // Capturar el frame visual en alta definición
-                CapturarSnapshotGrafico(rutaImagen);
+                // Capturar el frame visual en alta definición (síncrono si el filtro AI va a evaluarlo de inmediato)
+                CapturarSnapshotGrafico(rutaImagen, ActivarFiltroVisionAI);
 
                 // Guardar referencia para etiquetar con resultado WIN/LOSS al cerrar el trade
                 ultimaSenalEjecutada = tipoSenal;
