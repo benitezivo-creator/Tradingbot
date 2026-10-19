@@ -1,8 +1,8 @@
 using System;
 using System.IO;
-using System.Drawing;
-using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Media.Imaging;
 using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Chart;
 using NinjaTrader.NinjaScript.Strategies;
@@ -22,8 +22,37 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string ultimoSnapshotImagen = string.Empty;
         private int ultimoTradeNumberRegistrado = -1;
 
+        #region Win32 GDI Screen Capture P/Invoke (Sin dependencias de System.Drawing)
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern bool BitBlt(IntPtr hObject, int nXDest, int nYDest, int nWidth, int nHeight, IntPtr hObjectSource, int nXSrc, int nYSrc, int dwRop);
+
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern IntPtr CreateCompatibleBitmap(IntPtr hDC, int nWidth, int nHeight);
+
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern bool DeleteDC(IntPtr hDC);
+
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+
+        [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        private const int SRCCOPY = 0x00CC0020;
+        #endregion
+
         /// <summary>
-        /// Captura la imagen del gráfico de NinjaTrader de forma directa (GDI/Screen Copy) para evitar marcos negros por aceleración GPU DirectX.
+        /// Captura la imagen del gráfico de NinjaTrader de forma directa (GDI BitBlt nativo) para evitar marcos negros por aceleración GPU DirectX.
+        /// No requiere ninguna referencia externa a System.Drawing.dll.
         /// </summary>
         private void CapturarSnapshotGrafico(string rutaDestino, bool sincrono = true)
         {
@@ -31,6 +60,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             Action accionCaptura = () =>
             {
+                IntPtr hdcScreen = IntPtr.Zero;
+                IntPtr hdcMem = IntPtr.Zero;
+                IntPtr hBitmap = IntPtr.Zero;
+                IntPtr hOld = IntPtr.Zero;
+
                 try
                 {
                     // Obtener las coordenadas físicas exactas del control del gráfico en la pantalla (DPI-Aware)
@@ -49,21 +83,29 @@ namespace NinjaTrader.NinjaScript.Strategies
                         Directory.CreateDirectory(directorio);
                     }
 
-                    // Captura con GDI+ sobre la ventana de NinjaTrader
-                    using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
-                    {
-                        using (Graphics g = Graphics.FromImage(bitmap))
-                        {
-                            g.CopyFromScreen(
-                                (int)upperLeft.X, 
-                                (int)upperLeft.Y, 
-                                0, 0, 
-                                new System.Drawing.Size(width, height), 
-                                CopyPixelOperation.SourceCopy
-                            );
-                        }
+                    // Captura GDI directa del contexto de pantalla (lee la GPU/DirectX sin marcos negros)
+                    hdcScreen = GetDC(IntPtr.Zero);
+                    hdcMem = CreateCompatibleDC(hdcScreen);
+                    hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
+                    hOld = SelectObject(hdcMem, hBitmap);
 
-                        bitmap.Save(rutaDestino, ImageFormat.Png);
+                    BitBlt(hdcMem, 0, 0, width, height, hdcScreen, (int)upperLeft.X, (int)upperLeft.Y, SRCCOPY);
+
+                    // Convertir hBitmap a BitmapSource nativo de WPF
+                    BitmapSource bitmapSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                        hBitmap,
+                        IntPtr.Zero,
+                        Int32Rect.Empty,
+                        BitmapSizeOptions.FromEmptyOptions()
+                    );
+
+                    // Guardar como PNG usando el codificador nativo WPF
+                    PngBitmapEncoder pngEncoder = new PngBitmapEncoder();
+                    pngEncoder.Frames.Add(BitmapFrame.Create(bitmapSource));
+
+                    using (FileStream stream = new FileStream(rutaDestino, FileMode.Create, FileAccess.Write))
+                    {
+                        pngEncoder.Save(stream);
                     }
 
                     Print(string.Format("[TELEMETRIA] Captura HD generada en: {0}", rutaDestino));
@@ -71,6 +113,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                 catch (Exception ex)
                 {
                     Print(string.Format("[TELEMETRIA ERROR] Fallo al capturar gráfico: {0}", ex.Message));
+                }
+                finally
+                {
+                    if (hdcMem != IntPtr.Zero && hOld != IntPtr.Zero)
+                        SelectObject(hdcMem, hOld);
+                    if (hBitmap != IntPtr.Zero)
+                        DeleteObject(hBitmap);
+                    if (hdcMem != IntPtr.Zero)
+                        DeleteDC(hdcMem);
+                    if (hdcScreen != IntPtr.Zero)
+                        ReleaseDC(IntPtr.Zero, hdcScreen);
                 }
             };
 
