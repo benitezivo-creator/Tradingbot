@@ -97,7 +97,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // 06. AI & Dataset Config
                 ExportarDatasetVision                       = true;
                 RutaDatasetVision                           = @"C:\Users\SIBS\Documents\Tradingbot\vision_dataset";
-                ActivarFiltroVisionAI                       = true;
+                ActivarFiltroVisionAI                       = false;
                 UmbralProbabilidadVisionAI                  = 0.70;
                 UrlServidorInferencia                       = "http://127.0.0.1:5005/predict";
             }

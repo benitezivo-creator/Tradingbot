@@ -18,14 +18,20 @@ namespace NinjaTrader.NinjaScript.Strategies
         // VISION AI INFERENCE GATE (RESNET-18 EN TIEMPO REAL)
         // =========================================================================
 
-        private static readonly HttpClient httpClientVision = new HttpClient { Timeout = TimeSpan.FromMilliseconds(800) };
+        private static readonly HttpClient httpClientVision = new HttpClient { Timeout = TimeSpan.FromMilliseconds(150) };
+        private static DateTime proximoIntentoServidor = DateTime.MinValue;
 
         /// <summary>
         /// Consulta al microservicio Python si la imagen capturada cumple con el filtro de IA (P_WIN >= Umbral).
+        /// Incluye circuit breaker para no causar latencia si el servidor local de Python no está activo.
         /// </summary>
         private bool ValidarEntradaConVisionAI(string rutaImagen)
         {
             if (!ActivarFiltroVisionAI)
+                return true;
+
+            // Si el servidor falló recientemente, no bloquear los ticks durante 15 segundos
+            if (DateTime.Now < proximoIntentoServidor)
                 return true;
 
             if (string.IsNullOrEmpty(rutaImagen) || !File.Exists(rutaImagen))
@@ -48,7 +54,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 StringContent content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
 
-                // Enviar petición POST sincrónica rápida al servidor local de inferencia
+                // Enviar petición POST ultrarrápida (timeout de 150ms)
                 HttpResponseMessage response = httpClientVision.PostAsync(url, content).Result;
 
                 if (response.IsSuccessStatusCode)
@@ -86,8 +92,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             catch (Exception ex)
             {
-                RegistrarLog(string.Format("[VISION AI ERROR] Servidor de inferencia no disponible ({0}). Permitiendo entrada por bypass de seguridad.", ex.Message));
-                return true; // Bypass de seguridad si el servidor Python no está activo
+                // Silenciar intentos durante 15s para evitar que el fallo del servidor de inferencia genere lag en los ticks
+                proximoIntentoServidor = DateTime.Now.AddSeconds(15);
+                RegistrarLog(string.Format("[VISION AI ERROR] Servidor de inferencia no disponible ({0}). Modo bypass activo por 15s.", ex.Message));
+                return true;
             }
         }
     }

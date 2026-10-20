@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using NinjaTrader.Cbi;
@@ -51,10 +52,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         #endregion
 
         /// <summary>
-        /// Captura la imagen del gráfico de NinjaTrader de forma directa (GDI BitBlt nativo) para evitar marcos negros por aceleración GPU DirectX.
-        /// No requiere ninguna referencia externa a System.Drawing.dll.
+        /// Captura la imagen del gráfico de forma ultraligera mediante Win32 BitBlt.
+        /// La captura del búfer ocurre en menos de 1 ms en el UI thread, y la compresión/escritura PNG
+        /// se delega a un hilo en segundo plano (Task.Run) para no causar jamás lag en los charts.
         /// </summary>
-        private void CapturarSnapshotGrafico(string rutaDestino, bool sincrono = true)
+        private void CapturarSnapshotGrafico(string rutaDestino, bool sincrono = false)
         {
             if (ChartControl == null) return;
 
@@ -64,6 +66,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 IntPtr hdcMem = IntPtr.Zero;
                 IntPtr hBitmap = IntPtr.Zero;
                 IntPtr hOld = IntPtr.Zero;
+                BitmapSource bitmapSource = null;
 
                 try
                 {
@@ -76,14 +79,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     if (width <= 10 || height <= 10) return;
 
-                    // Crear directorio si no existe
-                    string directorio = Path.GetDirectoryName(rutaDestino);
-                    if (!string.IsNullOrEmpty(directorio) && !Directory.Exists(directorio))
-                    {
-                        Directory.CreateDirectory(directorio);
-                    }
-
-                    // Captura GDI directa del contexto de pantalla (lee la GPU/DirectX sin marcos negros)
+                    // Captura GDI directa del contexto de pantalla (ultrarrápida < 1ms)
                     hdcScreen = GetDC(IntPtr.Zero);
                     hdcMem = CreateCompatibleDC(hdcScreen);
                     hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
@@ -92,27 +88,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                     BitBlt(hdcMem, 0, 0, width, height, hdcScreen, (int)upperLeft.X, (int)upperLeft.Y, SRCCOPY);
 
                     // Convertir hBitmap a BitmapSource nativo de WPF
-                    BitmapSource bitmapSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                    bitmapSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
                         hBitmap,
                         IntPtr.Zero,
                         Int32Rect.Empty,
                         BitmapSizeOptions.FromEmptyOptions()
                     );
 
-                    // Guardar como PNG usando el codificador nativo WPF
-                    PngBitmapEncoder pngEncoder = new PngBitmapEncoder();
-                    pngEncoder.Frames.Add(BitmapFrame.Create(bitmapSource));
-
-                    using (FileStream stream = new FileStream(rutaDestino, FileMode.Create, FileAccess.Write))
-                    {
-                        pngEncoder.Save(stream);
-                    }
-
-                    Print(string.Format("[TELEMETRIA] Captura HD generada en: {0}", rutaDestino));
+                    // Congelar para transferir de forma segura fuera del hilo UI
+                    bitmapSource.Freeze();
                 }
                 catch (Exception ex)
                 {
-                    Print(string.Format("[TELEMETRIA ERROR] Fallo al capturar gráfico: {0}", ex.Message));
+                    Print(string.Format("[TELEMETRIA ERROR] Fallo al capturar bitmap: {0}", ex.Message));
                 }
                 finally
                 {
@@ -125,14 +113,42 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (hdcScreen != IntPtr.Zero)
                         ReleaseDC(IntPtr.Zero, hdcScreen);
                 }
+
+                // La compresión PNG pesada y la escritura a disco se procesan en segundo plano
+                if (bitmapSource != null)
+                {
+                    Task.Run(() =>
+                    {
+                        try
+                        {
+                            string directorio = Path.GetDirectoryName(rutaDestino);
+                            if (!string.IsNullOrEmpty(directorio) && !Directory.Exists(directorio))
+                            {
+                                Directory.CreateDirectory(directorio);
+                            }
+
+                            PngBitmapEncoder pngEncoder = new PngBitmapEncoder();
+                            pngEncoder.Frames.Add(BitmapFrame.Create(bitmapSource));
+
+                            using (FileStream stream = new FileStream(rutaDestino, FileMode.Create, FileAccess.Write, FileShare.None, 8192, false))
+                            {
+                                pngEncoder.Save(stream);
+                            }
+
+                            Print(string.Format("[TELEMETRIA] Captura HD generada en: {0}", rutaDestino));
+                        }
+                        catch (Exception ex)
+                        {
+                            Print(string.Format("[TELEMETRIA ERROR] Fallo al guardar archivo PNG: {0}", ex.Message));
+                        }
+                    });
+                }
             };
 
-            if (sincrono)
+            // Ejecución no bloqueante del UI Thread
+            if (ChartControl.Dispatcher.CheckAccess())
             {
-                if (ChartControl.Dispatcher.CheckAccess())
-                    accionCaptura();
-                else
-                    ChartControl.Dispatcher.Invoke(accionCaptura);
+                accionCaptura();
             }
             else
             {
