@@ -4,7 +4,10 @@
     {
       "label": "Git: Commit & Sync Bot Changes",
       "type": "shell",
-      "command": "git add . && git commit -m \"Auto-sync: Actualización automática del bot local y NT8\" && git push",
+      "windows": {
+        "command": "cmd /c \"git add -A && git commit -m \\\"Auto-sync: Actualización automática del bot local y NT8\\\" && git push\""
+      },
+      "command": "git add -A && git commit -m \"Auto-sync: Actualización automática del bot local y NT8\" && git push",
       "group": {
         "kind": "build",
         "isDefault": true
