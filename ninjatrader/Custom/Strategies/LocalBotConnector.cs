@@ -5,11 +5,15 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using System.Globalization;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Windows.Media;
 using NinjaTrader.Cbi;
 using NinjaTrader.Gui;
 using NinjaTrader.Data;
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.Strategies;
+using NinjaTrader.NinjaScript.DrawingTools;
 #endregion
 
 namespace NinjaTrader.NinjaScript.Strategies
@@ -23,9 +27,31 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool isConnected = false;
         private DateTime lastConnectAttempt = DateTime.MinValue;
 
+        #region Properties
         [NinjaScriptProperty]
-        public bool OnlyRealtime
-        { get; set; }
+        [Display(Name = "Solo Ticks en Tiempo Real", Description = "Ignora ticks históricos al cargar el gráfico.", Order = 1, GroupName = "1. Conexión")]
+        public bool OnlyRealtime { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Cantidad de Contratos", Description = "Número de contratos por orden.", Order = 2, GroupName = "2. Gestión de Órdenes")]
+        public int OrderQuantity { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 1000)]
+        [Display(Name = "Stop Loss (Ticks)", Description = "Stop Loss automático en ticks (0 para desactivar).", Order = 3, GroupName = "2. Gestión de Órdenes")]
+        public int StopLossTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 2000)]
+        [Display(Name = "Profit Target (Ticks)", Description = "Take Profit automático en ticks (0 para desactivar).", Order = 4, GroupName = "2. Gestión de Órdenes")]
+        public int ProfitTargetTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Máx Entradas por Dirección", Description = "Número máximo de contratos acumulables en la misma dirección.", Order = 5, GroupName = "2. Gestión de Órdenes")]
+        public int MaxEntriesPerDirection { get; set; }
+        #endregion
 
         protected override void OnStateChange()
         {
@@ -36,9 +62,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Calculate                               = Calculate.OnEachTick;
                 IsInstantiatedOnEachOptimizationIteration = false;
                 OnlyRealtime                            = true;
+                OrderQuantity                           = 1;
+                StopLossTicks                           = 40; // 10 puntos en NQ/MNQ
+                ProfitTargetTicks                       = 80; // 20 puntos en NQ/MNQ
+                MaxEntriesPerDirection                  = 1;
             }
             else if (State == State.DataLoaded)
             {
+                EntriesPerDirection = MaxEntriesPerDirection;
+                EntryHandling = EntryHandling.AllEntries;
+
+                if (StopLossTicks > 0)
+                    SetStopLoss(CalculationMode.Ticks, StopLossTicks);
+
+                if (ProfitTargetTicks > 0)
+                    SetProfitTarget(CalculationMode.Ticks, ProfitTargetTicks);
+
                 ConnectToLocalBot();
             }
             else if (State == State.Terminated)
@@ -80,11 +119,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnBarUpdate()
         {
-            // Si está cargando datos históricos y OnlyRealtime está activo, no enviar ticks pasados
             if (OnlyRealtime && State != State.Realtime) return;
             if (CurrentBar < 1) return;
 
-            // Reintento automático de conexión si el servidor Python no estaba iniciado al arrancar NinjaTrader
             if (!isConnected)
             {
                 if ((DateTime.Now - lastConnectAttempt).TotalSeconds > 5)
@@ -96,7 +133,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             try
             {
-                // InvariantCulture asegura que el punto (.) sea el separador decimal en cualquier configuración regional
                 string jsonPayload = string.Format(
                     CultureInfo.InvariantCulture,
                     "{{\"instrument\":\"{0}\",\"close\":{1:F2},\"volume\":{2:F0},\"time\":\"{3}\"}}\n",
@@ -130,7 +166,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     string[] signals = response.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                     foreach (var sig in signals)
                     {
-                        // TriggerCustomEvent traslada la ejecución al hilo de la estrategia de NinjaTrader de forma segura
                         TriggerCustomEvent(state => ProcessSignal(state as string), sig.Trim());
                     }
                 }
@@ -146,19 +181,36 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (string.IsNullOrEmpty(signal)) return;
 
-            Print(string.Format("LocalBotConnector: Señal ejecutada -> [{0}] a las {1}", signal, Time[0]));
+            Print(string.Format("LocalBotConnector: Señal recibida -> [{0}] | Posición: {1} ({2})", 
+                signal, Position.MarketPosition, Position.Quantity));
 
             if (signal.Contains("BUY"))
             {
+                if (Position.MarketPosition == MarketPosition.Long && Position.Quantity >= MaxEntriesPerDirection)
+                {
+                    Print(string.Format("LocalBotConnector: Señal BUY ignorada (ya existe posición Long de {0} contrato(s)).", Position.Quantity));
+                    return;
+                }
+
                 if (Position.MarketPosition == MarketPosition.Short)
                     ExitShort("Bot_SELL");
-                EnterLong(1, "Bot_BUY");
+
+                EnterLong(OrderQuantity, "Bot_BUY");
+                Draw.ArrowUp(this, "BuyArrow_" + CurrentBar, true, 0, Low[0] - (TickSize * 4), Brushes.LimeGreen);
             }
             else if (signal.Contains("SELL"))
             {
+                if (Position.MarketPosition == MarketPosition.Short && Position.Quantity >= MaxEntriesPerDirection)
+                {
+                    Print(string.Format("LocalBotConnector: Señal SELL ignorada (ya existe posición Short de {0} contrato(s)).", Position.Quantity));
+                    return;
+                }
+
                 if (Position.MarketPosition == MarketPosition.Long)
                     ExitLong("Bot_BUY");
-                EnterShort(1, "Bot_SELL");
+
+                EnterShort(OrderQuantity, "Bot_SELL");
+                Draw.ArrowDown(this, "SellArrow_" + CurrentBar, true, 0, High[0] + (TickSize * 4), Brushes.Crimson);
             }
             else if (signal.Contains("FLATTEN"))
             {
