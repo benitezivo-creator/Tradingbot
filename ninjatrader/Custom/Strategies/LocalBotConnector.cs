@@ -46,11 +46,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Range(0, 2000)]
         [Display(Name = "Profit Target (Ticks)", Description = "Take Profit automático en ticks (0 para desactivar).", Order = 4, GroupName = "2. Gestión de Órdenes")]
         public int ProfitTargetTicks { get; set; }
-
-        [NinjaScriptProperty]
-        [Range(1, 10)]
-        [Display(Name = "Máx Entradas por Dirección", Description = "Número máximo de contratos acumulables en la misma dirección.", Order = 5, GroupName = "2. Gestión de Órdenes")]
-        public int MaxEntriesPerDirection { get; set; }
         #endregion
 
         protected override void OnStateChange()
@@ -65,19 +60,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                 OrderQuantity                           = 1;
                 StopLossTicks                           = 40; // 10 puntos en NQ/MNQ
                 ProfitTargetTicks                       = 80; // 20 puntos en NQ/MNQ
-                MaxEntriesPerDirection                  = 1;
+                EntriesPerDirection                     = 1;
+                EntryHandling                           = EntryHandling.AllEntries;
             }
-            else if (State == State.DataLoaded)
+            else if (State == State.Configure)
             {
-                EntriesPerDirection = MaxEntriesPerDirection;
-                EntryHandling = EntryHandling.AllEntries;
-
                 if (StopLossTicks > 0)
                     SetStopLoss(CalculationMode.Ticks, StopLossTicks);
 
                 if (ProfitTargetTicks > 0)
                     SetProfitTarget(CalculationMode.Ticks, ProfitTargetTicks);
-
+            }
+            else if (State == State.DataLoaded)
+            {
                 ConnectToLocalBot();
             }
             else if (State == State.Terminated)
@@ -186,7 +181,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (signal.Contains("BUY"))
             {
-                if (Position.MarketPosition == MarketPosition.Long && Position.Quantity >= MaxEntriesPerDirection)
+                if (Position.MarketPosition == MarketPosition.Long && Position.Quantity >= EntriesPerDirection)
                 {
                     Print(string.Format("LocalBotConnector: Señal BUY ignorada (ya existe posición Long de {0} contrato(s)).", Position.Quantity));
                     return;
@@ -200,7 +195,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (signal.Contains("SELL"))
             {
-                if (Position.MarketPosition == MarketPosition.Short && Position.Quantity >= MaxEntriesPerDirection)
+                if (Position.MarketPosition == MarketPosition.Short && Position.Quantity >= EntriesPerDirection)
                 {
                     Print(string.Format("LocalBotConnector: Señal SELL ignorada (ya existe posición Short de {0} contrato(s)).", Position.Quantity));
                     return;
