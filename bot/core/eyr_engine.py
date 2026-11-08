@@ -210,3 +210,4 @@ class ExcesoRotacionEngine:
         if "asia_h" in market_data: self.asia_high = float(market_data["asia_h"])
         if "asia_l" in market_data: self.asia_low = float(market_data["asia_l"])
         if "vwap" in market_data: self.vwap = float(market_data["vwap"])
+

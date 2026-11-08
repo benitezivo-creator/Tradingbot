@@ -40,3 +40,4 @@ class ConfigManager:
         if key is None:
             return sec
         return sec.get(key, default)
+

@@ -95,3 +95,4 @@ class DatasetRecorder:
                         writer.writerow(row)
         except Exception as e:
             logging.error(f"Error guardando dataset: {e}")
+
