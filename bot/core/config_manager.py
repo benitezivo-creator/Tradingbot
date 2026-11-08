@@ -34,10 +34,18 @@ class ConfigManager:
             logging.error(f"[CONFIG ERROR] No se pudo leer config.json: {e}")
         return False
 
-    def get(self, section: str, key: str = None, default = None):
+    def get(self, section: str, key = None, default = None):
         self.reload_if_modified()
-        sec = self.config.get(section, {})
+
+        # Si el segundo argumento no es un string (ej. pasó un dict por defecto como get("operativa", {}))
+        if key is not None and not isinstance(key, str):
+            default = key
+            key = None
+
+        sec = self.config.get(section, default if default is not None else {})
         if key is None:
             return sec
-        return sec.get(key, default)
 
+        if isinstance(sec, dict):
+            return sec.get(key, default)
+        return default
