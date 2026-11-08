@@ -45,6 +45,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double precioEntrada = 0.0;
         private bool tp1Alcanzado = false;
         private bool protegidoBE = false;
+        private int barraUltimoCierre = -999;
 
         #region Properties
         [NinjaScriptProperty]
@@ -79,6 +80,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Range(1, 500)]
         [Display(Name = "TP Cortos Runner (Puntos)", Description = "Target del tercer tercio solo en cortos (45 pts = 180 ticks). En largos corre libre.", Order = 7, GroupName = "2. Gestión en 3 Tercios")]
         public double TPRunnerCortosPuntos { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Barras Cooldown Post-Trade", Description = "Barras mínimas de espera tras cerrar una operación antes de permitir otra.", Order = 8, GroupName = "2. Gestión en 3 Tercios")]
+        public int BarrasCooldownPostTrade { get; set; }
         #endregion
 
         protected override void OnStateChange()
@@ -97,13 +103,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 TP1Puntos                               = 15.0; // 60 ticks
                 TP2Puntos                               = 30.0; // 120 ticks
                 TPRunnerCortosPuntos                    = 45.0; // 180 ticks
+                BarrasCooldownPostTrade                 = 10;   // Cooldown obligatorio entre trades
                 
-                EntriesPerDirection                     = 3; // Permite los 3 tercios
+                EntriesPerDirection                     = 3; // Permite exactamente los 3 tercios
                 EntryHandling                           = EntryHandling.AllEntries;
             }
             else if (State == State.Configure)
             {
-                // Configurar Brackets de 3 tercios nativos
                 int ticksPorPunto = (int)Math.Round(1.0 / Math.Max(1E-10, TickSize));
                 int slTicks = (int)Math.Round(StopLossPuntos * ticksPorPunto);
                 int tp1Ticks = (int)Math.Round(TP1Puntos * ticksPorPunto);
@@ -237,25 +243,31 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (string.IsNullOrEmpty(signal)) return;
 
-            Print(string.Format("LocalBotConnector: Señal recibida -> [{0}] en {1} | Posición actual: {2} ({3})", 
-                signal, Instrument.FullName, Position.MarketPosition, Position.Quantity));
+            // REGLA 1 DE ORO: Si ya hay una posición activa en el mercado, IGNORAR rotundamente cualquier señal nueva
+            if (Position.MarketPosition != MarketPosition.Flat)
+            {
+                Print(string.Format("LocalBotConnector: Señal [{0}] rechazada -> Posición activa en {1} ({2} contratos). No se sobre-opera.", 
+                    signal, Position.MarketPosition, Position.Quantity));
+                return;
+            }
+
+            // REGLA 2 DE ORO: Cooldown obligatorio tras cerrar una operación previa
+            if (CurrentBar - barraUltimoCierre < BarrasCooldownPostTrade)
+            {
+                Print(string.Format("LocalBotConnector: Señal [{0}] ignorada por Cooldown ({1}/{2} barras tras cierre anterior).", 
+                    signal, CurrentBar - barraUltimoCierre, BarrasCooldownPostTrade));
+                return;
+            }
+
+            Print(string.Format("LocalBotConnector: >>> EJECUTANDO NUEVO TRADE DISCRECIONAL -> [{0}] en {1} a las {2}", 
+                signal, Instrument.FullName, Time[0]));
 
             if (signal.Contains("BUY"))
             {
-                if (Position.MarketPosition == MarketPosition.Long && Position.Quantity >= 3)
-                {
-                    Print("LocalBotConnector: BUY ignorada (los 3 tercios Long ya están activos).");
-                    return;
-                }
-
-                if (Position.MarketPosition == MarketPosition.Short)
-                    CerrarTodaLaPosicion();
-
                 tp1Alcanzado = false;
                 protegidoBE = false;
                 precioEntrada = Close[0];
 
-                // Ejecución escalonada en 3 tercios
                 EnterLong(ContratosPorTercio, ORDEN_L1);
                 EnterLong(ContratosPorTercio, ORDEN_L2);
                 EnterLong(ContratosPorTercio, ORDEN_L3);
@@ -264,20 +276,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (signal.Contains("SELL"))
             {
-                if (Position.MarketPosition == MarketPosition.Short && Position.Quantity >= 3)
-                {
-                    Print("LocalBotConnector: SELL ignorada (los 3 tercios Short ya están activos).");
-                    return;
-                }
-
-                if (Position.MarketPosition == MarketPosition.Long)
-                    CerrarTodaLaPosicion();
-
                 tp1Alcanzado = false;
                 protegidoBE = false;
                 precioEntrada = Close[0];
 
-                // Ejecución escalonada en 3 tercios
                 EnterShort(ContratosPorTercio, ORDEN_S1);
                 EnterShort(ContratosPorTercio, ORDEN_S2);
                 EnterShort(ContratosPorTercio, ORDEN_S3);
@@ -301,7 +303,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     if (execution.Order.OrderAction == OrderAction.Sell || execution.Order.OrderAction == OrderAction.BuyToCover)
                     {
-                        // Se llenó el Profit Target del Tercio 1 (+15 pts)
                         tp1Alcanzado = true;
                         if (!protegidoBE && precioEntrada > 0)
                         {
@@ -323,9 +324,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
             }
 
-            // Notificar a Python cuando la posición vuelve a quedar FLAT para actualizar el dataset
+            // Notificar a Python cuando la posición vuelve a quedar FLAT para actualizar el dataset y liberar el estado
             if (Position.MarketPosition == MarketPosition.Flat && precioEntrada > 0)
             {
+                barraUltimoCierre = CurrentBar; // Activa el cooldown entre operaciones
+
                 try
                 {
                     double pnlPuntos = (execution.Order != null && execution.Order.OrderAction == OrderAction.Sell) ? (price - precioEntrada) : (precioEntrada - price);
@@ -337,6 +340,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 catch { }
 
+                Print(string.Format("LocalBotConnector: Posición CERRADA (FLAT). Cooldown activo por {0} barras.", BarrasCooldownPostTrade));
                 precioEntrada = 0.0;
                 tp1Alcanzado = false;
                 protegidoBE = false;

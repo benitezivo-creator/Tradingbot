@@ -140,6 +140,7 @@ class TradingBotServer:
             if self.active_trade_id:
                 self.recorder.update_trade_result(self.active_trade_id, resultado, pnl)
                 self.active_trade_id = None
+            self.eyr_engine.notificar_trade_cerrado(pnl)
             return
 
         # Si es un tick de análisis (proviene de NQ o gráfico único)
