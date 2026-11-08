@@ -1,18 +1,19 @@
 import socket
+import select
 import json
 import logging
 import os
 import sys
-from collections import deque
-import torch
-import torch.nn.functional as F
+from datetime import datetime
 
 # Añadir raíz del proyecto al sys.path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from bot.models.train import LocalDecisionModel
+from bot.core.config_manager import ConfigManager
+from bot.core.dataset_recorder import DatasetRecorder
+from bot.core.eyr_engine import ExcesoRotacionEngine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,151 +22,162 @@ logging.basicConfig(
 )
 
 class TradingBotServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 5555, weights_path: str = None):
+    def __init__(self, host: str = "127.0.0.1", port: int = 5555):
         self.host = host
         self.port = port
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logging.info(f"Iniciando Bot local en PyTorch (Dispositivo: {self.device})")
         
-        # Buffer de precios (últimos 20 precios)
-        self.price_buffer = deque(maxlen=20)
-        self.actions = {0: "HOLD", 1: "BUY", 2: "SELL"}
-        self.min_confidence = 0.60  # Exigir al menos 60% de certeza para emitir orden
-        self.ticks_since_last_signal = 0
-        self.cooldown_ticks = 15    # Esperar al menos 15 ticks entre señales para evitar sobre-operar
+        # Módulos del sistema
+        self.config_manager = ConfigManager()
+        self.recorder = DatasetRecorder()
+        self.eyr_engine = ExcesoRotacionEngine(self.config_manager)
 
-        # Cargar modelo entrenado si existe
-        if weights_path is None:
-            weights_path = os.path.join(BASE_DIR, "bot", "models", "model_weights.pth")
-            
-        self.model = LocalDecisionModel(input_size=10, num_classes=3).to(self.device)
-        self.has_weights = False
-        if os.path.exists(weights_path):
-            try:
-                self.model.load_state_dict(torch.load(weights_path, map_location=self.device))
-                self.model.eval()
-                self.has_weights = True
-                logging.info(f"Pesos de red neuronal cargados desde: {weights_path}")
-            except Exception as e:
-                logging.warning(f"Error cargando pesos ({e}).")
-
-    def evaluate_decision(self, market_data: dict) -> tuple[str, str]:
-        """
-        Evalúa el tick de mercado y devuelve (Acción, Motivo detallado).
-        """
-        close_price = float(market_data.get("close", 0.0))
-        if close_price <= 0:
-            return "HOLD", "Precio inválido"
-
-        self.price_buffer.append(close_price)
-        self.ticks_since_last_signal += 1
-
-        # Requerir al menos 10 precios para alimentar la red
-        if len(self.price_buffer) < 10:
-            return "HOLD", f"Acumulando datos ({len(self.price_buffer)}/10 ticks)"
-
-        # Extraer ventana de los últimos 10 precios
-        prices = list(self.price_buffer)[-10:]
-
-        try:
-            with torch.no_grad():
-                # 1. Normalización de precios respecto al primer tick de la ventana
-                norm_prices = [(p - prices[0]) / (prices[0] * 0.001 + 1e-6) for p in prices]
-                input_tensor = torch.tensor(norm_prices, dtype=torch.float32).unsqueeze(0).to(self.device)
-                
-                # 2. Inferencia y cálculo de probabilidades (Softmax)
-                logits = self.model(input_tensor)
-                probs = F.softmax(logits, dim=1).squeeze(0)
-                
-                prob_hold = float(probs[0].item())
-                prob_buy = float(probs[1].item())
-                prob_sell = float(probs[2].item())
-
-                decision_idx = int(torch.argmax(probs).item())
-                max_prob = max(prob_hold, prob_buy, prob_sell)
-                raw_action = self.actions.get(decision_idx, "HOLD")
-
-                # Criterio explicativo para el usuario
-                detalle = (
-                    f"P(HOLD): {prob_hold*100:.1f}% | P(BUY): {prob_buy*100:.1f}% | "
-                    f"P(SELL): {prob_sell*100:.1f}%"
-                )
-
-                # Si no supera el umbral de confianza, no enviar orden
-                if max_prob < self.min_confidence:
-                    return "HOLD", f"{detalle} -> Confianza {max_prob*100:.1f}% < {self.min_confidence*100:.0f}%"
-
-                # Cooldown entre señales consecutivas
-                if raw_action != "HOLD" and self.ticks_since_last_signal < self.cooldown_ticks:
-                    return "HOLD", f"{detalle} -> En cooldown ({self.ticks_since_last_signal}/{self.cooldown_ticks} ticks)"
-
-                if raw_action != "HOLD":
-                    self.ticks_since_last_signal = 0
-
-                return raw_action, detalle
-
-        except Exception as e:
-            logging.error(f"Error durante inferencia: {e}")
-            return "HOLD", f"Excepción en inferencia: {e}"
+        # Clientes conectados (Socket -> Metadatos/Rol)
+        self.clients = {}  # socket -> {"role": "ANALYZER"|"EXECUTOR"|"HYBRID", "instrument": str}
+        self.analyzer_sockets = set()
+        self.executor_sockets = set()
+        self.active_trade_id = None
 
     def start(self):
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.port))
-        server_socket.listen(1)
-        
-        logging.info("=" * 70)
-        logging.info(f" Servidor TCP listo en {self.host}:{self.port}")
-        logging.info(f" Umbral de confianza mínimo: {self.min_confidence*100:.0f}% | Cooldown: {self.cooldown_ticks} ticks")
-        logging.info("=" * 70)
+        server_socket.listen(5)
+        server_socket.setblocking(False)
 
-        tick_count = 0
+        logging.info("=" * 75)
+        logging.info(" SERVIDOR DE TRADINGBOT INICIADO (ARQUITECTURA EXCESO & ROTACIÓN)")
+        logging.info(f" Host: {self.host}:{self.port}")
+        logging.info(" Hot-Reloading de config.json: ACTIVO")
+        logging.info(" Grabadora de Setups & Memoria: ACTIVA")
+        logging.info(" Modo Multi-Instrumento: NQ (Análisis) -> MNQ (Ejecución)")
+        logging.info("=" * 75)
+
+        sockets_to_read = [server_socket]
+
         while True:
             try:
-                conn, addr = server_socket.accept()
-                logging.info(f"[+] Conexión establecida con NinjaTrader desde {addr}")
-                
-                buffer = ""
-                while True:
-                    data = conn.recv(2048).decode('utf-8')
-                    if not data:
-                        logging.warning("[-] NinjaTrader cerró la conexión.")
-                        break
-                    
-                    buffer += data
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.strip()
-                        if not line:
-                            continue
-                            
-                        try:
-                            payload = json.loads(line)
-                            action, motivo = self.evaluate_decision(payload)
-                            tick_count += 1
-                            
-                            # Mostrar detalle periódico o cuando hay señal
-                            if action != "HOLD" or tick_count % 15 == 0:
-                                logging.info(
-                                    f"Tick #{tick_count} | {payload.get('instrument')} @ {payload.get('close')} | "
-                                    f"Acción: {action} | {motivo}"
-                                )
+                # Recargar config.json si fue modificado en disco
+                self.config_manager.reload_if_modified()
 
-                            if action != "HOLD":
-                                logging.info(f">>> [ORDEN EMITIDA A NINJA] -> {action} ({motivo})")
-                                conn.sendall(f"{action}\n".encode('utf-8'))
-                        except json.JSONDecodeError as err:
-                            logging.error(f"Error decodificando JSON: '{line}' ({err})")
-                            continue
+                # Multiplexado no bloqueante con select
+                readable, _, _ = select.select(sockets_to_read, [], [], 0.5)
+
+                for s in readable:
+                    if s is server_socket:
+                        # Nueva conexión entrante desde NinjaTrader
+                        client_socket, client_addr = server_socket.accept()
+                        client_socket.setblocking(False)
+                        sockets_to_read.append(client_socket)
+                        self.clients[client_socket] = {"role": "UNKNOWN", "instrument": "UNKNOWN", "buffer": ""}
+                        logging.info(f"[+] Nueva conexión establecida desde {client_addr}")
+
+                    else:
+                        # Datos recibidos de un cliente conectado
+                        try:
+                            data = s.recv(4096).decode('utf-8')
+                            if not data:
+                                self._desconectar_cliente(s, sockets_to_read)
+                                continue
+
+                            client_info = self.clients[s]
+                            client_info["buffer"] += data
+
+                            while "\n" in client_info["buffer"]:
+                                line, client_info["buffer"] = client_info["buffer"].split("\n", 1)
+                                line = line.strip()
+                                if line:
+                                    self._procesar_mensaje_nt(s, line)
+
+                        except ConnectionResetError:
+                            self._desconectar_cliente(s, sockets_to_read)
+                        except Exception as e:
+                            logging.error(f"Error procesando socket: {e}")
 
             except KeyboardInterrupt:
                 logging.info("Servidor detenido manualmente.")
                 break
             except Exception as e:
-                logging.error(f"Error en el servidor: {e}")
-            finally:
-                if 'conn' in locals() and conn:
-                    conn.close()
+                logging.error(f"Error en el bucle principal: {e}")
+
+    def _procesar_mensaje_nt(self, client_sock, json_str: str):
+        try:
+            payload = json.loads(json_str)
+        except json.JSONDecodeError:
+            return
+
+        instrument = payload.get("instrument", "").upper()
+        role = payload.get("role", "")
+
+        # Asignar o autodetectar rol del cliente
+        client_info = self.clients.get(client_sock, {})
+        if not role:
+            # Si el instrumento contiene "MNQ", se considera ejecutor; si contiene "NQ", analizador
+            if "MNQ" in instrument:
+                role = "EXECUTOR"
+            elif "NQ" in instrument:
+                role = "ANALYZER"
+            else:
+                role = "HYBRID"
+
+        if client_info.get("role") != role:
+            client_info["role"] = role
+            client_info["instrument"] = instrument
+            if role == "ANALYZER":
+                self.analyzer_sockets.add(client_sock)
+                logging.info(f"[CANAL IDENTIFICADO] Gráfico de Análisis (NQ) registrado: {instrument}")
+            elif role == "EXECUTOR":
+                self.executor_sockets.add(client_sock)
+                logging.info(f"[CANAL IDENTIFICADO] Gráfico de Ejecución (MNQ) registrado: {instrument}")
+            else:
+                self.analyzer_sockets.add(client_sock)
+                self.executor_sockets.add(client_sock)
+                logging.info(f"[CANAL IDENTIFICADO] Gráfico Híbrido registrado: {instrument}")
+
+        # Si es un evento de trade cerrado / ejecución
+        if "event" in payload and payload["event"] == "TRADE_CLOSED":
+            pnl = float(payload.get("pnl_points", 0.0))
+            resultado = "WIN" if pnl > 0 else "LOSS"
+            if self.active_trade_id:
+                self.recorder.update_trade_result(self.active_trade_id, resultado, pnl)
+                self.active_trade_id = None
+            return
+
+        # Si es un tick de análisis (proviene de NQ o gráfico único)
+        if client_sock in self.analyzer_sockets or len(self.clients) == 1:
+            accion, motivo, setup_snapshot = self.eyr_engine.procesar_tick_nq(payload)
+
+            if accion in ["BUY", "SELL", "FLATTEN"]:
+                # Registrar el setup en la memoria viva para entrenamiento
+                if setup_snapshot:
+                    setup_snapshot["instrumento_analisis"] = instrument
+                    setup_snapshot["instrumento_ejecucion"] = "MNQ"
+                    self.active_trade_id = self.recorder.record_setup(setup_snapshot)
+
+                # Despachar orden a todos los ejecutores (MNQ)
+                self._despachar_orden(accion, motivo)
+
+    def _despachar_orden(self, accion: str, motivo: str):
+        destinatarios = self.executor_sockets if self.executor_sockets else list(self.clients.keys())
+        logging.info(f">>> [DESPACHANDO ORDEN A NINJATRADER] -> {accion} | Destinatarios: {len(destinatarios)} | Motivo: {motivo}")
+
+        mensaje = f"{accion}\n".encode('utf-8')
+        for sock in destinatarios:
+            try:
+                sock.sendall(mensaje)
+            except Exception as e:
+                logging.error(f"Error enviando orden al socket ejecutor: {e}")
+
+    def _desconectar_cliente(self, s, sockets_list):
+        if s in sockets_list:
+            sockets_list.remove(s)
+        self.analyzer_sockets.discard(s)
+        self.executor_sockets.discard(s)
+        client_info = self.clients.pop(s, {})
+        try:
+            s.close()
+        except:
+            pass
+        logging.warning(f"[-] Cliente desconectado ({client_info.get('role', 'DESCONOCIDO')} - {client_info.get('instrument', '')})")
 
 if __name__ == "__main__":
     bot = TradingBotServer()

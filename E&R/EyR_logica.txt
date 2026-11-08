@@ -1,0 +1,174 @@
+========================================================================
+EXCESO Y ROTACIÓN — LÓGICA
+========================================================================
+
+HORARIOS DE SESIÓN (hora de Nueva York)
+------------------------------------------------------------------------
+    ASIA        19:00 → 03:00
+    EUROPA      03:00 → 09:30
+    NUEVA YORK  09:30 → cierre
+
+    Sídney queda dentro de la asiática y no se computa aparte.
+
+    Los horarios son fijos. Cada sesión se calcula de forma independiente:
+    al abrir una sesión se reinicia su delta y su perfil.
+
+
+ESTADO QUE SE MANTIENE
+------------------------------------------------------------------------
+delta_acumulado        suma corrida de agresión (+ compra a mercado, − venta a mercado)
+volumen[precio]        contratos operados en cada nivel de precio
+velocidad_flujo        agresión por unidad de ventana
+
+NIVELES
+    high/low de Asia        (del rango 19:00 → 03:00)
+    high/low de Europa      (del rango 03:00 → 09:30)
+    vwap
+    vah / val / poc
+
+
+LÓGICA DEL EXCESO
+------------------------------------------------------------------------
+Por cada trade:
+
+    actualizar delta_acumulado
+    actualizar volumen[precio]
+    actualizar velocidad_flujo sobre la ventana móvil
+
+    SI velocidad_flujo supera el umbral:
+        lado    = el que domina la agresión en la ventana
+        EXCESO  = verdadero
+        registrar precio_exceso
+        registrar extremo_exceso = precio más extremo alcanzado mientras
+                                   la velocidad siga por encima del umbral
+
+    MIENTRAS la velocidad siga por encima del umbral:
+        el exceso sigue siendo el mismo evento (no se emite uno nuevo)
+        actualizar extremo_exceso
+
+
+LÓGICA DE LA ROTACIÓN
+------------------------------------------------------------------------
+Tras un exceso:
+
+    SI exceso fue de VENTA (extremo = mínimo):
+        rotación = el precio sube desde extremo_exceso
+    SI exceso fue de COMPRA (extremo = máximo):
+        rotación = el precio baja desde extremo_exceso
+
+    La rotación se confirma cuando el giro alcanza la distancia mínima.
+    Si no la alcanza dentro del plazo, el evento se descarta.
+
+
+LÓGICA DE LAS DOS VÍAS (desenlace)
+------------------------------------------------------------------------
+Después de confirmada la rotación:
+
+    SI el precio regresa a la zona de extremo_exceso y continúa en el
+    sentido del exceso:
+        → RETEST (deja pauta)
+
+    SI el precio no regresa a extremo_exceso durante la sesión:
+        → GIRO COMPLETO (zona de aterrizaje)
+
+
+LÓGICA DEL GATILLO DE APERTURA
+------------------------------------------------------------------------
+    SI es la primera barra de 15m desde las 09:30
+    Y la barra toca o rompe el high/low de Europa
+    Y ocurre un exceso
+    Y se confirma la rotación:
+        → evento de apertura
+
+    El 15m ubica el evento.
+    El exceso y la rotación se leen sobre la serie de trades / rango.
+
+
+LÓGICA DEL DELTA (scalp o estructural)
+------------------------------------------------------------------------
+CONVERGENCIA
+    SI delta_acumulado se mueve en el mismo sentido que el precio → convergente
+    SI no → divergente
+
+    convergente  → el movimiento se sostiene  → estructural
+    divergente   → el movimiento es hueco     → scalp
+
+ESTRÉS
+    SI |delta_acumulado| supera el umbral → estresado
+    El estrés es condición de contexto, no disparador.
+
+MIGRACIÓN
+    delta_acumulado viaja de un extremo al opuesto cruzando cero.
+
+BRACKET
+    SI delta_acumulado llega a cero y rebota sin cruzar:
+        → migración fallida → scalp
+
+    SI delta_acumulado cruza cero, avanza al extremo opuesto,
+    y después retesta el cero sin perderlo:
+        → migración exitosa → estructural
+
+
+LÓGICA DE PONDERACIÓN
+------------------------------------------------------------------------
+PESO POR NIVEL donde ocurre el exceso, de mayor a menor:
+
+    high/low de Europa
+    high/low de Asia
+    vwap
+    val / vah
+    poc
+    sin nivel
+
+CONFLUENCIA
+    varios niveles coincidentes pesan más que la suma de sus pesos
+
+MODIFICADOR DE DELTA
+    delta convergente / migración exitosa  → eleva el peso
+    delta divergente / muerto              → rebaja el peso
+
+PREPONDERANCIA
+    un nivel único con delta convergente puede pesar más que una
+    confluencia con delta muerto
+
+    el nivel dice dónde mirar
+    el delta dice si vale
+
+
+LÓGICA DE GESTIÓN
+------------------------------------------------------------------------
+Posición en tres tercios iguales.
+
+    stop        20 puntos, toda la posición
+    tp1  1/3    +15 puntos
+    tp2  1/3    +30 puntos
+    runner 1/3  se deja correr
+
+    AL alcanzar tp1 → mover stop a break even
+    POR ENCIMA de ~100 puntos de recorrido → gestionar el runner
+                                             (parciales o apretar salida)
+    EN CORTOS → el runner no se deja correr
+
+
+MÁQUINA DE ESTADOS
+------------------------------------------------------------------------
+    IDLE
+      └ exceso detectado        → EXCESO
+    EXCESO
+      ├ rotación confirmada     → ROTACIÓN
+      └ vence el plazo          → DESCARTADO
+    ROTACIÓN
+      └ ponderación calculada   → SEÑAL
+    SEÑAL
+      └ entrada                 → EN POSICIÓN
+    EN POSICIÓN
+      ├ tp1                     → PROTEGIDO (stop a break even)
+      └ stop                    → CERRADO
+    PROTEGIDO
+      └ tp2                     → RUNNER
+    RUNNER
+      └ salida                  → CERRADO
+    cualquiera
+      └ fin de sesión           → CERRADO
+
+========================================================================

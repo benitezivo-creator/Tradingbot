@@ -1,0 +1,35 @@
+{
+  "comentario": "Configuración en caliente para Estrategia Exceso y Rotación (E&R)",
+  "version": "1.0.0",
+  "operativa": {
+    "modo_bot": "AUTOMATICO",
+    "bias_permitido": "AMBOS",
+    "max_trades_dia": 6,
+    "solo_sesion_rth": false
+  },
+  "exceso_rotacion": {
+    "umbral_velocidad_exceso": 80.0,
+    "rotacion_minima_puntos": 6.0,
+    "ventana_ticks_rotacion": 40,
+    "retroceso_impulso_pct": 0.50
+  },
+  "niveles_relevantes": {
+    "usar_europa_hl": true,
+    "usar_asia_hl": true,
+    "usar_vwap": true,
+    "tolerancia_nivel_puntos": 4.0
+  },
+  "gestion_3_tercios": {
+    "contratos_por_tercio": 1,
+    "stop_loss_puntos": 20.0,
+    "tp1_puntos": 15.0,
+    "tp2_puntos": 30.0,
+    "tp_runner_cortos_puntos": 45.0,
+    "mover_a_break_even_en_tp1": true
+  },
+  "aprendizaje_dataset": {
+    "grabar_setups": true,
+    "guardar_snapshots_csv": true,
+    "archivo_dataset": "bot/dataset/setups_history.json"
+  }
+}
