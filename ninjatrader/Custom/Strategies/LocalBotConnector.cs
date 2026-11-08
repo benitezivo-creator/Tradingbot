@@ -27,6 +27,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             Hibrido_Auto         // Autodetecta según el instrumento del gráfico
         }
 
+        public enum TipoSesion
+        {
+            Ninguna,
+            Asia,       // 19:00 -> 03:00 NY
+            Europa,     // 03:00 -> 09:30 NY
+            NuevaYork   // 09:30 -> 17:00 NY
+        }
+
         private const string ORDEN_L1 = "Entrada_L1";
         private const string ORDEN_L2 = "Entrada_L2";
         private const string ORDEN_L3 = "Entrada_L3";
@@ -46,6 +54,23 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool tp1Alcanzado = false;
         private bool protegidoBE = false;
         private int barraUltimoCierre = -999;
+
+        // Niveles de Sesión E&R y VWAP
+        private TimeZoneInfo nyTimeZone;
+        private TipoSesion sesionActual = TipoSesion.Ninguna;
+        private double asiaHigh = double.MinValue;
+        private double asiaLow = double.MaxValue;
+        private double ultimoAsiaHigh = double.NaN;
+        private double ultimoAsiaLow = double.NaN;
+
+        private double europaHigh = double.MinValue;
+        private double europaLow = double.MaxValue;
+        private double ultimoEuropaHigh = double.NaN;
+        private double ultimoEuropaLow = double.NaN;
+
+        private double vwapSumPrecioVol = 0.0;
+        private double vwapSumVolumen = 0.0;
+        private double vwapActual = double.NaN;
 
         #region Properties
         [NinjaScriptProperty]
@@ -137,11 +162,67 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.DataLoaded)
             {
+                InicializarZonaHoraria();
                 ConnectToLocalBot();
             }
             else if (State == State.Terminated)
             {
                 DisconnectBot();
+            }
+        }
+
+        private void InicializarZonaHoraria()
+        {
+            try { nyTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"); }
+            catch { try { nyTimeZone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York"); } catch { nyTimeZone = TimeZoneInfo.Local; } }
+        }
+
+        private DateTime AHoraNuevaYork(DateTime tiempo)
+        {
+            if (nyTimeZone == null) InicializarZonaHoraria();
+            if (tiempo.Kind == DateTimeKind.Utc) return TimeZoneInfo.ConvertTimeFromUtc(tiempo, nyTimeZone);
+            DateTime local = tiempo.Kind == DateTimeKind.Local ? tiempo : DateTime.SpecifyKind(tiempo, DateTimeKind.Local);
+            return TimeZoneInfo.ConvertTime(local, TimeZoneInfo.Local, nyTimeZone);
+        }
+
+        private void ActualizarSesionesYNiveles(DateTime tiempo, double high, double low, double close, long volume)
+        {
+            DateTime nyTime = AHoraNuevaYork(tiempo);
+            TimeSpan h = nyTime.TimeOfDay;
+
+            TipoSesion nueva;
+            if (h >= new TimeSpan(19, 0, 0) || h < new TimeSpan(3, 0, 0)) nueva = TipoSesion.Asia;
+            else if (h >= new TimeSpan(3, 0, 0) && h < new TimeSpan(9, 30, 0)) nueva = TipoSesion.Europa;
+            else if (h >= new TimeSpan(9, 30, 0) && h < new TimeSpan(17, 0, 0)) nueva = TipoSesion.NuevaYork;
+            else nueva = TipoSesion.Ninguna;
+
+            if (nueva != sesionActual)
+            {
+                if (sesionActual == TipoSesion.Asia) { ultimoAsiaHigh = asiaHigh; ultimoAsiaLow = asiaLow; }
+                if (sesionActual == TipoSesion.Europa) { ultimoEuropaHigh = europaHigh; ultimoEuropaLow = europaLow; }
+                sesionActual = nueva;
+                vwapSumPrecioVol = 0.0;
+                vwapSumVolumen = 0.0;
+                if (nueva == TipoSesion.Asia) { asiaHigh = double.MinValue; asiaLow = double.MaxValue; }
+                if (nueva == TipoSesion.Europa) { europaHigh = double.MinValue; europaLow = double.MaxValue; }
+            }
+
+            if (sesionActual == TipoSesion.Asia)
+            {
+                if (high > asiaHigh) asiaHigh = high;
+                if (low < asiaLow) asiaLow = low;
+            }
+            else if (sesionActual == TipoSesion.Europa)
+            {
+                if (high > europaHigh) europaHigh = high;
+                if (low < europaLow) europaLow = low;
+            }
+
+            if (volume > 0)
+            {
+                vwapSumPrecioVol += close * volume;
+                vwapSumVolumen += volume;
+                vwapActual = vwapSumPrecioVol / vwapSumVolumen;
             }
         }
 
@@ -178,8 +259,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnBarUpdate()
         {
-            if (OnlyRealtime && State != State.Realtime) return;
             if (CurrentBar < 1) return;
+
+            // Actualizar niveles y sesiones siempre (incluso en histórico para que Europa y Asia estén disponibles)
+            ActualizarSesionesYNiveles(Time[0], High[0], Low[0], Close[0], (long)Volume[0]);
+
+            if (OnlyRealtime && State != State.Realtime) return;
 
             if (!isConnected)
             {
@@ -194,14 +279,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 string rolStr = Rol == RolConector.Hibrido_Auto ? (Instrument.FullName.Contains("MNQ") ? "EXECUTOR" : "ANALYZER") : (Rol == RolConector.Ejecutor_MNQ ? "EXECUTOR" : "ANALYZER");
 
+                double eh = !double.IsNaN(ultimoEuropaHigh) ? ultimoEuropaHigh : (europaHigh > double.MinValue ? europaHigh : 0.0);
+                double el = !double.IsNaN(ultimoEuropaLow) ? ultimoEuropaLow : (europaLow < double.MaxValue ? europaLow : 0.0);
+                double ah = !double.IsNaN(ultimoAsiaHigh) ? ultimoAsiaHigh : (asiaHigh > double.MinValue ? asiaHigh : 0.0);
+                double al = !double.IsNaN(ultimoAsiaLow) ? ultimoAsiaLow : (asiaLow < double.MaxValue ? asiaLow : 0.0);
+                double vwap = !double.IsNaN(vwapActual) ? vwapActual : Close[0];
+
                 string jsonPayload = string.Format(
                     CultureInfo.InvariantCulture,
-                    "{{\"instrument\":\"{0}\",\"role\":\"{1}\",\"close\":{2:F2},\"volume\":{3:F0},\"time\":\"{4}\"}}\n",
+                    "{{\"instrument\":\"{0}\",\"role\":\"{1}\",\"close\":{2:F2},\"high\":{3:F2},\"low\":{4:F2},\"volume\":{5:F0},\"time\":\"{6}\",\"europa_h\":{7:F2},\"europa_l\":{8:F2},\"asia_h\":{9:F2},\"asia_l\":{10:F2},\"vwap\":{11:F2}}}\n",
                     Instrument.FullName,
                     rolStr,
                     Close[0],
+                    High[0],
+                    Low[0],
                     Volume[0],
-                    Time[0].ToString("o")
+                    Time[0].ToString("o"),
+                    eh, el, ah, al, vwap
                 );
 
                 byte[] data = Encoding.UTF8.GetBytes(jsonPayload);
@@ -327,7 +421,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Notificar a Python cuando la posición vuelve a quedar FLAT para actualizar el dataset y liberar el estado
             if (Position.MarketPosition == MarketPosition.Flat && precioEntrada > 0)
             {
-                barraUltimoCierre = CurrentBar; // Activa el cooldown entre operaciones
+                barraUltimoCierre = CurrentBar;
 
                 try
                 {
