@@ -32,10 +32,11 @@ class TradingBotServer:
         self.eyr_engine = ExcesoRotacionEngine(self.config_manager)
 
         # Clientes conectados (Socket -> Metadatos/Rol)
-        self.clients = {}  # socket -> {"role": "ANALYZER"|"EXECUTOR"|"HYBRID", "instrument": str}
+        self.clients = {}  # socket -> {"role": "ANALYZER"|"EXECUTOR"|"HYBRID", "instrument": str, "buffer": str}
         self.analyzer_sockets = set()
         self.executor_sockets = set()
         self.active_trade_id = None
+        self.tick_counter = 0
 
     def start(self):
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -111,7 +112,6 @@ class TradingBotServer:
         # Asignar o autodetectar rol del cliente
         client_info = self.clients.get(client_sock, {})
         if not role:
-            # Si el instrumento contiene "MNQ", se considera ejecutor; si contiene "NQ", analizador
             if "MNQ" in instrument:
                 role = "EXECUTOR"
             elif "NQ" in instrument:
@@ -143,12 +143,17 @@ class TradingBotServer:
             self.eyr_engine.notificar_trade_cerrado(pnl)
             return
 
-        # Si es un tick de análisis (proviene de NQ o gráfico único)
+        # Si es un tick de análisis (proviene de NQ o gráfico único MNQ si no hay NQ)
         if client_sock in self.analyzer_sockets or len(self.clients) == 1:
-            accion, motivo, setup_snapshot = self.eyr_engine.procesar_tick_nq(payload)
+            self.tick_counter += 1
+            accion, motivo, setup_snapshot, hud_info = self.eyr_engine.procesar_tick_nq(payload)
+
+            # Enviar actualización de HUD a NinjaTrader periódicamente
+            if self.tick_counter % 10 == 0 and hud_info:
+                self._enviar_hud_info(hud_info)
 
             if accion in ["BUY", "SELL", "FLATTEN"]:
-                # Registrar el setup en la memoria viva para entrenamiento
+                # Registrar el setup en la memoria viva para entrenamiento de PyTorch
                 if setup_snapshot:
                     setup_snapshot["instrumento_analisis"] = instrument
                     setup_snapshot["instrumento_ejecucion"] = "MNQ"
@@ -156,6 +161,14 @@ class TradingBotServer:
 
                 # Despachar orden a todos los ejecutores (MNQ)
                 self._despachar_orden(accion, motivo)
+
+    def _enviar_hud_info(self, hud_info: str):
+        msg = f"HUD:{hud_info}\n".encode('utf-8')
+        for sock in list(self.clients.keys()):
+            try:
+                sock.sendall(msg)
+            except:
+                pass
 
     def _despachar_orden(self, accion: str, motivo: str):
         destinatarios = self.executor_sockets if self.executor_sockets else list(self.clients.keys())

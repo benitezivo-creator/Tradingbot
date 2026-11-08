@@ -56,7 +56,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int barraUltimoCierre = -999;
 
         // Niveles de Sesión E&R y VWAP
-        private TimeZoneInfo nyTimeZone;
         private TipoSesion sesionActual = TipoSesion.Ninguna;
         private double asiaHigh = double.MinValue;
         private double asiaLow = double.MaxValue;
@@ -68,9 +67,23 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double ultimoEuropaHigh = double.NaN;
         private double ultimoEuropaLow = double.NaN;
 
+        private double chartMaxHigh = double.MinValue;
+        private double chartMinLow = double.MaxValue;
+
         private double vwapSumPrecioVol = 0.0;
         private double vwapSumVolumen = 0.0;
         private double vwapActual = double.NaN;
+
+        // Agresión de tick individual
+        private long lastVolume = 0;
+        private int lastVolumeBar = -1;
+        private double lastPrice = 0.0;
+        private int lastDeltaSign = 1;
+
+        // On-Chart HUD
+        private string hudEstado = "IDLE";
+        private string hudNivel = "ESPERANDO";
+        private string hudVel = "0.0/0.0";
 
         #region Properties
         [NinjaScriptProperty]
@@ -162,7 +175,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.DataLoaded)
             {
-                InicializarZonaHoraria();
                 ConnectToLocalBot();
             }
             else if (State == State.Terminated)
@@ -171,40 +183,33 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        private void InicializarZonaHoraria()
+        private void ActualizarSesionesYNiveles(DateTime tiempo, double high, double low, double close, long tickVol)
         {
-            try { nyTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"); }
-            catch { try { nyTimeZone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York"); } catch { nyTimeZone = TimeZoneInfo.Local; } }
-        }
+            TimeSpan h = tiempo.TimeOfDay;
 
-        private DateTime AHoraNuevaYork(DateTime tiempo)
-        {
-            if (nyTimeZone == null) InicializarZonaHoraria();
-            if (tiempo.Kind == DateTimeKind.Utc) return TimeZoneInfo.ConvertTimeFromUtc(tiempo, nyTimeZone);
-            DateTime local = tiempo.Kind == DateTimeKind.Local ? tiempo : DateTime.SpecifyKind(tiempo, DateTimeKind.Local);
-            return TimeZoneInfo.ConvertTime(local, TimeZoneInfo.Local, nyTimeZone);
-        }
-
-        private void ActualizarSesionesYNiveles(DateTime tiempo, double high, double low, double close, long volume)
-        {
-            DateTime nyTime = AHoraNuevaYork(tiempo);
-            TimeSpan h = nyTime.TimeOfDay;
-
+            // Rango de sesiones según E&R/EyR_logica.txt (horario NY nativo del chart)
             TipoSesion nueva;
             if (h >= new TimeSpan(19, 0, 0) || h < new TimeSpan(3, 0, 0)) nueva = TipoSesion.Asia;
             else if (h >= new TimeSpan(3, 0, 0) && h < new TimeSpan(9, 30, 0)) nueva = TipoSesion.Europa;
             else if (h >= new TimeSpan(9, 30, 0) && h < new TimeSpan(17, 0, 0)) nueva = TipoSesion.NuevaYork;
             else nueva = TipoSesion.Ninguna;
 
+            if (high > chartMaxHigh) chartMaxHigh = high;
+            if (low < chartMinLow) chartMinLow = low;
+
             if (nueva != sesionActual)
             {
                 if (sesionActual == TipoSesion.Asia) { ultimoAsiaHigh = asiaHigh; ultimoAsiaLow = asiaLow; }
                 if (sesionActual == TipoSesion.Europa) { ultimoEuropaHigh = europaHigh; ultimoEuropaLow = europaLow; }
                 sesionActual = nueva;
-                vwapSumPrecioVol = 0.0;
-                vwapSumVolumen = 0.0;
-                if (nueva == TipoSesion.Asia) { asiaHigh = double.MinValue; asiaLow = double.MaxValue; }
-                if (nueva == TipoSesion.Europa) { europaHigh = double.MinValue; europaLow = double.MaxValue; }
+                
+                if (nueva == TipoSesion.NuevaYork)
+                {
+                    vwapSumPrecioVol = 0.0;
+                    vwapSumVolumen = 0.0;
+                }
+                else if (nueva == TipoSesion.Asia) { asiaHigh = double.MinValue; asiaLow = double.MaxValue; }
+                else if (nueva == TipoSesion.Europa) { europaHigh = double.MinValue; europaLow = double.MaxValue; }
             }
 
             if (sesionActual == TipoSesion.Asia)
@@ -217,12 +222,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (high > europaHigh) europaHigh = high;
                 if (low < europaLow) europaLow = low;
             }
-
-            if (volume > 0)
+            else if (sesionActual == TipoSesion.NuevaYork)
             {
-                vwapSumPrecioVol += close * volume;
-                vwapSumVolumen += volume;
-                vwapActual = vwapSumPrecioVol / vwapSumVolumen;
+                if (tickVol > 0)
+                {
+                    vwapSumPrecioVol += close * tickVol;
+                    vwapSumVolumen += tickVol;
+                    vwapActual = vwapSumPrecioVol / vwapSumVolumen;
+                }
             }
         }
 
@@ -240,7 +247,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     socketClient.Close();
                     isConnected = false;
-                    Print(string.Format("LocalBotConnector: Esperando conexión con Bot Python en {0}:{1}...", serverIp, serverPort));
                     return;
                 }
                 socketClient.EndConnect(result);
@@ -261,14 +267,30 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (CurrentBar < 1) return;
 
-            // Actualizar niveles y sesiones siempre (incluso en histórico para que Europa y Asia estén disponibles)
-            ActualizarSesionesYNiveles(Time[0], High[0], Low[0], Close[0], (long)Volume[0]);
+            // 1. Cálculo del volumen y delta incremental por tick
+            long currentVol = (long)Volume[0];
+            long tickVol = (CurrentBar == lastVolumeBar) ? Math.Max(1, currentVol - lastVolume) : Math.Max(1, currentVol);
+            lastVolume = currentVol;
+            lastVolumeBar = CurrentBar;
+
+            double tickDelta = 0;
+            if (Close[0] > lastPrice) tickDelta = tickVol;
+            else if (Close[0] < lastPrice) tickDelta = -tickVol;
+            else tickDelta = lastDeltaSign * tickVol;
+            if (tickDelta != 0) lastDeltaSign = Math.Sign(tickDelta);
+            lastPrice = Close[0];
+
+            // 2. Actualizar niveles y sesiones siempre (incluyendo histórico para tener niveles pre-market)
+            ActualizarSesionesYNiveles(Time[0], High[0], Low[0], Close[0], tickVol);
+
+            // 3. Renderizar HUD en pantalla
+            ActualizarHUDEnGrafico();
 
             if (OnlyRealtime && State != State.Realtime) return;
 
             if (!isConnected)
             {
-                if ((DateTime.Now - lastConnectAttempt).TotalSeconds > 5)
+                if ((DateTime.Now - lastConnectAttempt).TotalSeconds > 3)
                 {
                     ConnectToLocalBot();
                 }
@@ -279,21 +301,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 string rolStr = Rol == RolConector.Hibrido_Auto ? (Instrument.FullName.Contains("MNQ") ? "EXECUTOR" : "ANALYZER") : (Rol == RolConector.Ejecutor_MNQ ? "EXECUTOR" : "ANALYZER");
 
-                double eh = !double.IsNaN(ultimoEuropaHigh) ? ultimoEuropaHigh : (europaHigh > double.MinValue ? europaHigh : 0.0);
-                double el = !double.IsNaN(ultimoEuropaLow) ? ultimoEuropaLow : (europaLow < double.MaxValue ? europaLow : 0.0);
+                // Fallbacks si la sesión anterior no alcanzó a registrarse en el histórico cargado
+                double eh = !double.IsNaN(ultimoEuropaHigh) ? ultimoEuropaHigh : (europaHigh > double.MinValue ? europaHigh : chartMaxHigh);
+                double el = !double.IsNaN(ultimoEuropaLow) ? ultimoEuropaLow : (europaLow < double.MaxValue ? europaLow : chartMinLow);
                 double ah = !double.IsNaN(ultimoAsiaHigh) ? ultimoAsiaHigh : (asiaHigh > double.MinValue ? asiaHigh : 0.0);
                 double al = !double.IsNaN(ultimoAsiaLow) ? ultimoAsiaLow : (asiaLow < double.MaxValue ? asiaLow : 0.0);
                 double vwap = !double.IsNaN(vwapActual) ? vwapActual : Close[0];
 
                 string jsonPayload = string.Format(
                     CultureInfo.InvariantCulture,
-                    "{{\"instrument\":\"{0}\",\"role\":\"{1}\",\"close\":{2:F2},\"high\":{3:F2},\"low\":{4:F2},\"volume\":{5:F0},\"time\":\"{6}\",\"europa_h\":{7:F2},\"europa_l\":{8:F2},\"asia_h\":{9:F2},\"asia_l\":{10:F2},\"vwap\":{11:F2}}}\n",
+                    "{{\"instrument\":\"{0}\",\"role\":\"{1}\",\"close\":{2:F2},\"high\":{3:F2},\"low\":{4:F2},\"volume\":{5:F0},\"delta\":{6:F0},\"time\":\"{7}\",\"europa_h\":{8:F2},\"europa_l\":{9:F2},\"asia_h\":{10:F2},\"asia_l\":{11:F2},\"vwap\":{12:F2}}}\n",
                     Instrument.FullName,
                     rolStr,
                     Close[0],
                     High[0],
                     Low[0],
-                    Volume[0],
+                    tickVol,
+                    tickDelta,
                     Time[0].ToString("o"),
                     eh, el, ah, al, vwap
                 );
@@ -310,7 +334,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private async Task ListenToBotResponses()
         {
-            byte[] buffer = new byte[1024];
+            byte[] buffer = new byte[2048];
             while (isConnected && socketClient != null && socketClient.Connected)
             {
                 try
@@ -319,10 +343,26 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (bytesRead == 0) break;
                     string response = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
 
-                    string[] signals = response.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                    foreach (var sig in signals)
+                    string[] lines = response.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var line in lines)
                     {
-                        TriggerCustomEvent(state => ProcessSignal(state as string), sig.Trim());
+                        string msg = line.Trim();
+                        if (msg.StartsWith("HUD:"))
+                        {
+                            // Actualización visual de HUD
+                            string hudData = msg.Substring(4);
+                            var parts = hudData.Split('|');
+                            if (parts.Length >= 3)
+                            {
+                                hudEstado = parts[0];
+                                hudNivel = parts[1];
+                                hudVel = parts[2];
+                            }
+                        }
+                        else if (msg.Contains("BUY") || msg.Contains("SELL") || msg.Contains("FLATTEN"))
+                        {
+                            TriggerCustomEvent(state => ProcessSignal(state as string), msg);
+                        }
                     }
                 }
                 catch
@@ -331,6 +371,35 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
             }
             isConnected = false;
+        }
+
+        private void ActualizarHUDEnGrafico()
+        {
+            try
+            {
+                string statusTxt;
+                Brush colorFondo;
+
+                if (!isConnected)
+                {
+                    statusTxt = string.Format(" ● BOT E&R: DESCONECTADO (Reintentando {0}:{1}) ", serverIp, serverPort);
+                    colorFondo = Brushes.Crimson;
+                }
+                else
+                {
+                    statusTxt = string.Format(" ● BOT E&R ACTIVO | {0} | {1} | Nivel: {2} | Vel: {3} | Pos: {4} ",
+                        Instrument.MasterInstrument.Name,
+                        hudEstado,
+                        hudNivel,
+                        hudVel,
+                        Position.MarketPosition == MarketPosition.Flat ? "FLAT" : string.Format("{0} ({1})", Position.MarketPosition, Position.Quantity)
+                    );
+                    colorFondo = hudEstado == "EXCESO" ? Brushes.OrangeRed : (hudEstado == "ROTACION" ? Brushes.Gold : Brushes.DarkSlateGray);
+                }
+
+                Draw.TextFixed(this, "ER_HUD_STATUS", statusTxt, TextPosition.TopLeft);
+            }
+            catch { }
         }
 
         private void ProcessSignal(string signal)
@@ -362,9 +431,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 protegidoBE = false;
                 precioEntrada = Close[0];
 
-                EnterLong(ContratosPorTercio, ORDEN_L1);
-                EnterLong(ContratosPorTercio, ORDEN_L2);
-                EnterLong(ContratosPorTercio, ORDEN_L3);
+                if (EntriesPerDirection >= 3)
+                {
+                    EnterLong(ContratosPorTercio, ORDEN_L1);
+                    EnterLong(ContratosPorTercio, ORDEN_L2);
+                    EnterLong(ContratosPorTercio, ORDEN_L3);
+                }
+                else
+                {
+                    EnterLong(ContratosPorTercio, ORDEN_L1);
+                }
 
                 Draw.ArrowUp(this, "BuyArrow_" + CurrentBar, true, 0, Low[0] - (TickSize * 4), Brushes.LimeGreen);
             }
@@ -374,9 +450,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 protegidoBE = false;
                 precioEntrada = Close[0];
 
-                EnterShort(ContratosPorTercio, ORDEN_S1);
-                EnterShort(ContratosPorTercio, ORDEN_S2);
-                EnterShort(ContratosPorTercio, ORDEN_S3);
+                if (EntriesPerDirection >= 3)
+                {
+                    EnterShort(ContratosPorTercio, ORDEN_S1);
+                    EnterShort(ContratosPorTercio, ORDEN_S2);
+                    EnterShort(ContratosPorTercio, ORDEN_S3);
+                }
+                else
+                {
+                    EnterShort(ContratosPorTercio, ORDEN_S1);
+                }
 
                 Draw.ArrowDown(this, "SellArrow_" + CurrentBar, true, 0, High[0] + (TickSize * 4), Brushes.Crimson);
             }
@@ -405,13 +488,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                             {
                                 SetStopLoss(ORDEN_L2, CalculationMode.Price, precioEntrada, false);
                                 SetStopLoss(ORDEN_L3, CalculationMode.Price, precioEntrada, false);
-                                Print(string.Format("LocalBotConnector: TP1 alcanzado (+15 pts). Stop Loss de L2 y L3 movido a Break-Even ({0})", precioEntrada));
+                                Print(string.Format("LocalBotConnector: TP1 alcanzado (+15 pts). Stop Loss movido a Break-Even ({0})", precioEntrada));
                             }
                             else if (Position.MarketPosition == MarketPosition.Short)
                             {
                                 SetStopLoss(ORDEN_S2, CalculationMode.Price, precioEntrada, false);
                                 SetStopLoss(ORDEN_S3, CalculationMode.Price, precioEntrada, false);
-                                Print(string.Format("LocalBotConnector: TP1 alcanzado (+15 pts). Stop Loss de S2 y S3 movido a Break-Even ({0})", precioEntrada));
+                                Print(string.Format("LocalBotConnector: TP1 alcanzado (+15 pts). Stop Loss movido a Break-Even ({0})", precioEntrada));
                             }
                         }
                     }
@@ -460,9 +543,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         private void DisconnectBot()
         {
             isConnected = false;
-            if (stream != null) { stream.Close(); stream = null; }
-            if (socketClient != null) { socketClient.Close(); socketClient = null; }
-            Print("LocalBotConnector: Desconectado de forma limpia.");
+            try
+            {
+                if (stream != null) stream.Close();
+                if (socketClient != null) socketClient.Close();
+            }
+            catch { }
         }
     }
 }
